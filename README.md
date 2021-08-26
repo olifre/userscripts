@@ -7,4 +7,5 @@ Be aware by default userscripts will be updated automatically, this can be confi
 ## ticket.uni-bonn.de
 [![Install directly](https://img.shields.io/badge/Install%20directly%20with-any%20Monkey-285959.svg)](https://raw.githubusercontent.com/olifre/userscripts/main/ticket.uni-bonn.de.user.js)
 
-Allows to select a larger number of tickets to show.
+Allows to select a larger number of tickets to show, and adds a "to English" button when replying to tickets,
+which replaces parts of the reply template.

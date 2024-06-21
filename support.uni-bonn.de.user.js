@@ -3,14 +3,14 @@
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de.user.js
-// @version     1.0.0
+// @version     1.0.2
 // @grant       none
 // @description Allows to select a larger number of tickets to show, and translate replies to English.
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
 // @license     Unlicense
 // ==/UserScript==
 
-if (/\bAction=AgentDashboard\b/.test (location.search) ) {
+if (/\bAction=AgentDashboard\b/.test (location.search) || /\bindex\.pl[?]?$/.test (location) ) {
   allConfigSelects = Array.from(document.querySelectorAll('[id^="UserDashboardPref"][id$="-Shown"]'));
 
   allConfigSelects.forEach(

@@ -3,13 +3,14 @@
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de.user.js
-// @version     1.0.2
+// @version     1.0.3
 // @grant       none
-// @description Allows to select a larger number of tickets to show, and translate replies to English.
+// @description Allows to select a larger number of tickets to show, translate replies to English, flip submit and draft button.
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
 // @license     Unlicense
 // ==/UserScript==
 
+// Allow more Tickets in views.
 if (/\bAction=AgentDashboard\b/.test (location.search) || /\bindex\.pl[?]?$/.test (location) ) {
   allConfigSelects = Array.from(document.querySelectorAll('[id^="UserDashboardPref"][id$="-Shown"]'));
 
@@ -32,7 +33,16 @@ if (/\bAction=AgentDashboard\b/.test (location.search) || /\bindex\.pl[?]?$/.tes
   );
 }
 
+// Flip submit and draft button so keyboard submit works.
+if (/\bAction=AgentTicketCompose\b/.test (location.search) || /\bAction=AgentTicketNote\b/.test (location.search)) {
+  var draftBtn = document.querySelector('button#FormDraftSave');
+  var submitBtn = document.querySelector('button#submitRichText');
+  if (draftBtn && submitBtn) {
+    draftBtn.parentNode.insertBefore(submitBtn, draftBtn);
+  }
+}
 
+// Add "translate to English" feature.
 if (/\bAction=AgentTicketEmail\b/.test (location.search) ) {
   var tlBtn=document.createElement('a');
   tlBtn.innerHTML="to English";

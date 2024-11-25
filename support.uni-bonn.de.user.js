@@ -3,9 +3,9 @@
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de.user.js
-// @version     1.0.6
+// @version     1.0.7
 // @grant       none
-// @description Allows to select a larger number of tickets to show, translate replies to English, flip submit and draft button.
+// @description Allows to select a larger number of tickets to show, translate replies to English, flip submit and draft button, fix page titles.
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
 // @license     Unlicense
 // ==/UserScript==
@@ -65,4 +65,13 @@ if (/\bAction=AgentTicketEmail\b/.test (location.search) ) {
   };
   var contentDiv = document.querySelector('label[for="RichText"]').parentElement;
   contentDiv.insertBefore(tlBtn, contentDiv.firstChild);
+}
+
+// Adapt page "title" for better browser history / detectability.
+if (/\bAction=AgentTicketZoom\b/.test (location.search) ) {
+  var ticketTitleHead = document.querySelector('div.Headline h1');
+  if (ticketTitleHead) {
+    var ticketTitle = ticketTitleHead.textContent.trim();
+    document.title = ticketTitle + " — Inhalt — Znuny";
+  }
 }

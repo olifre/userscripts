@@ -3,7 +3,7 @@
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de.user.js
-// @version     1.0.7
+// @version     1.0.8
 // @grant       none
 // @description Allows to select a larger number of tickets to show, translate replies to English, flip submit and draft button, fix page titles.
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
@@ -35,6 +35,7 @@ if (/\bAction=AgentDashboard\b/.test (location.search) || /\bindex\.pl[?]?$/.tes
 
 // Flip submit and draft button so keyboard submit works.
 if (/\bAction=AgentTicketCompose\b/.test (location.search) ||
+    /\bAction=AgentTicketEmailOutbound\b/.test (location.search) ||
     /\bAction=AgentTicketMove\b/.test (location.search) ||
     /\bAction=AgentTicketClose\b/.test (location.search) ||
     /\bAction=AgentTicketNote\b/.test (location.search) ||

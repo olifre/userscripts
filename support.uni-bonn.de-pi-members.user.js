@@ -3,7 +3,7 @@
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-pi-members.user.js
-// @version     1.0.1
+// @version     1.0.2
 // @grant       none
 // @description Autocomplete for Znuny contacts based on public Physics institute member data
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
@@ -26,7 +26,7 @@
   const DATA_URL = "https://grp_phy.gitlab-pages.uni-bonn.de/it/web/vcard_generator/contacts.json";
 
   const CACHE_KEY = "znuny_contacts_cache_v1";
-  const CACHE_TTL = 24 * 60 * 60 * 1000;
+  const CACHE_TTL = 12 * 60 * 60 * 1000;
 
   let contacts = [];
 

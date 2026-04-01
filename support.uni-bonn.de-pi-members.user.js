@@ -68,11 +68,12 @@
 
     // Map zu Objekten mit text und search
     return entries.map(e => {
-      const text = `${e.degree || ""} ${e.firstname || ""} ${e.lastname || ""} <${e.email || ""}>`
+      const text = `"${e.degree ? e.degree + " " : ""}${e.firstname || ""} ${e.lastname || ""}" <${e.email || ""}>`
       .replace(/\s+/g, ' ')
       .trim();
 
-      const search = `${text} ${e.function_tags || ""} ${e.group_tags || ""}`.toLowerCase();
+      //const search = `${text} ${e.function_tags || ""} ${e.group_tags || ""}`.toLowerCase();
+      const search = text.toLowerCase();
 
       return { text, search };
     });

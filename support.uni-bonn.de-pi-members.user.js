@@ -3,7 +3,7 @@
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-pi-members.user.js
-// @version     1.1.0
+// @version     1.1.2
 // @grant       none
 // @description Autocomplete for Znuny contacts based on public Physics institute member data
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
@@ -24,11 +24,11 @@
     return;
   }
 
-  const DATA_URL = "https://grp_phy.gitlab-pages.uni-bonn.de/it/web/vcard_generator/contacts.json";
+  const PHY_DATA_URL = "https://grp_phy.gitlab-pages.uni-bonn.de/it/web/vcard_generator/contacts.json";
   const OLD_CACHE_KEY = "znuny_contacts_cache_v1";
   const DB_NAME = "ZnunyContactDB";
-  const DB_VERSION = 1;
-  const CACHE_TTL = 12 * 60 * 60 * 1000;
+  const DB_VERSION = 2;
+  const PHY_CACHE_TTL = 12 * 60 * 60 * 1000;
 
   let contacts = [];
 
@@ -39,16 +39,17 @@
     }
   }
 
-  // Create DB.
   function openDB() {
     return new Promise((resolve, reject) => {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
 
       request.onupgradeneeded = (event) => {
         const db = event.target.result;
-        if (!db.objectStoreNames.contains("contacts")) {
-          db.createObjectStore("contacts", { autoIncrement: true });
+        if (db.objectStoreNames.contains("contacts")) {
+          db.deleteObjectStore("contacts");
         }
+        db.createObjectStore("contacts", { keyPath: "email" });
+
         if (!db.objectStoreNames.contains("metadata")) {
           db.createObjectStore("metadata");
         }
@@ -65,13 +66,31 @@
     const contactStore = tx.objectStore("contacts");
     const metaStore = tx.objectStore("metadata");
 
-    contactStore.clear();
-    data.forEach(item => contactStore.add(item));
-    metaStore.put(Date.now(), "lastUpdate");
+    // Use put to handle updates via email key, live incremental updates. Purge happens after sync.
+    data.forEach(item => contactStore.put(item));
+    metaStore.put(Date.now(), "lastPhyUpdate");
 
     return new Promise((resolve) => {
       tx.oncomplete = () => resolve();
     });
+  }
+
+  // Actual cleanup of older entries after full sync.
+  async function cleanupOldRecords(source, validSyncID) {
+    const db = await openDB();
+    const tx = db.transaction("contacts", "readwrite");
+    const store = tx.objectStore("contacts");
+    const request = store.openCursor();
+
+    request.onsuccess = (event) => {
+      const cursor = event.target.result;
+      if (cursor) {
+        if (cursor.value.source === source && cursor.value.syncID !== validSyncID) {
+          cursor.delete();
+        }
+        cursor.continue();
+      }
+    };
   }
 
   async function loadFromIndexedDB() {
@@ -81,12 +100,12 @@
       const contactStore = tx.objectStore("contacts");
       const metaStore = tx.objectStore("metadata");
 
-      const lastUpdate = await new Promise(res => {
-        const req = metaStore.get("lastUpdate");
+      const lastPhyUpdate = await new Promise(res => {
+        const req = metaStore.get("lastPhyUpdate");
         req.onsuccess = () => res(req.result);
       });
 
-      if (!lastUpdate || (Date.now() - lastUpdate > CACHE_TTL)) {
+      if (!lastPhyUpdate || (Date.now() - lastPhyUpdate > PHY_CACHE_TTL)) {
         return null;
       }
 
@@ -103,20 +122,26 @@
     }
   }
 
-  async function fetchData() {
-    const res = await fetch(DATA_URL);
+  async function fetchPhyData() {
+    const res = await fetch(PHY_DATA_URL);
     if (!res.ok) throw new Error("HTTP " + res.status);
     return res.json();
   }
 
-  function transform(data) {
+  function transformPhy(data, syncID) {
     const entries = Object.values(data);
     return entries.map(e => {
       const text = `"${e.degree ? e.degree + " " : ""}${e.firstname || ""} ${e.lastname || ""}" <${e.email || ""}>`
         .replace(/\s+/g, ' ')
         .trim();
       const search = text.toLowerCase();
-      return { text, search };
+      return {
+        email: e.email.toLowerCase(),
+        text,
+        search,
+        source: 'phy',
+        syncID: syncID
+      };
     });
   }
 
@@ -131,10 +156,12 @@
     }
 
     try {
-      const data = await fetchData();
-      contacts = transform(data);
+      const syncID = Date.now();
+      const data = await fetchPhyData();
+      contacts = transformPhy(data, syncID);
       await saveToIndexedDB(contacts);
-      console.log("[Autocomplete] Data reloaded and stored in IDB");
+      await cleanupOldRecords('phy', syncID);
+      console.log("[Autocomplete] PHY Data reloaded and stored in IDB");
     } catch (e) {
       console.error("[Autocomplete] Error loading data:", e);
     }

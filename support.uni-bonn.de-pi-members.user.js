@@ -3,7 +3,7 @@
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-pi-members.user.js
-// @version     1.1.3
+// @version     1.1.2
 // @grant       none
 // @description Autocomplete for Znuny contacts based on public Physics institute member data
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
@@ -71,10 +71,7 @@
     metaStore.put(Date.now(), "lastPhyUpdate");
 
     return new Promise((resolve) => {
-      tx.oncomplete = () => {
-          db.close();
-          resolve();
-      };
+      tx.oncomplete = () => resolve();
     });
   }
 
@@ -94,13 +91,6 @@
         cursor.continue();
       }
     };
-    
-    return new Promise((resolve) => {
-      tx.oncomplete = () => {
-          db.close();
-          resolve();
-      };
-    });
   }
 
   async function loadFromIndexedDB() {
@@ -116,7 +106,6 @@
       });
 
       if (!lastPhyUpdate || (Date.now() - lastPhyUpdate > PHY_CACHE_TTL)) {
-        db.close();
         return null;
       }
 
@@ -124,7 +113,6 @@
         const req = contactStore.getAll();
         req.onsuccess = () => {
           console.log("[Autocomplete] IDB Cache used:", req.result.length, "contacts");
-          db.close();
           resolve(req.result);
         };
       });
@@ -160,30 +148,23 @@
   async function loadData() {
     cleanupOldCache();
 
-    // Use a Web Lock to prevent multiple tabs from updating the DB simultaneously
-    await navigator.locks.request('znuny_db_sync', async () => {
-      const cached = await loadFromIndexedDB();
+    const cached = await loadFromIndexedDB();
 
-      if (cached && cached.length > 0) {
-        contacts = cached;
-        return;
-      }
+    if (cached && cached.length > 0) {
+      contacts = cached;
+      return;
+    }
 
-      try {
-        console.log("[Autocomplete] Cache stale or empty. Fetching fresh data...");
-        const syncID = Date.now();
-        const data = await fetchPhyData();
-        const transformed = transformPhy(data, syncID);
-        
-        await saveToIndexedDB(transformed);
-        await cleanupOldRecords('phy', syncID);
-        
-        contacts = transformed;
-        console.log("[Autocomplete] PHY Data reloaded and stored in IDB");
-      } catch (e) {
-        console.error("[Autocomplete] Error loading data:", e);
-      }
-    });
+    try {
+      const syncID = Date.now();
+      const data = await fetchPhyData();
+      contacts = transformPhy(data, syncID);
+      await saveToIndexedDB(contacts);
+      await cleanupOldRecords('phy', syncID);
+      console.log("[Autocomplete] PHY Data reloaded and stored in IDB");
+    } catch (e) {
+      console.error("[Autocomplete] Error loading data:", e);
+    }
   }
 
   function getCurrentToken(value, cursorPos) {
@@ -296,7 +277,7 @@
         dropdown.move(-1);
         e.preventDefault();
       } else if (e.key === "Enter") {
-        if (box && box.style.display === "block") {
+        if (document.querySelector('[style*="display: block"]')) {
            dropdown.choose();
            e.preventDefault();
         }

@@ -1,11 +1,11 @@
 // ==UserScript==
-// @name        Znuny: Contact Autocomplete for Physics Institute Members
+// @name        Znuny: Contact Autocomplete (multi-source, priority + per-source TTL/lease)
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-pi-members.user.js
-// @version     1.2.0
+// @version     1.3.0
 // @grant       none
-// @description Autocomplete for Znuny contacts based on public Physics institute member data
+// @description Autocomplete for Znuny contacts based on multiple sources (priority on collisions)
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
 // @license     Unlicense
 // ==/UserScript==
@@ -14,40 +14,89 @@
   'use strict';
 
   // Filter on relevant pages.
-  if (!(/\bAction=AgentTicketCompose\b/.test(location.search) ||
-      /\bAction=AgentTicketEmail\b/.test(location.search) ||
-      /\bAction=AgentTicketEmailOutbound\b/.test(location.search) ||
-      /\bAction=AgentTicketPhoneOutbound\b/.test(location.search) ||
-      /\bAction=AgentTicketPhoneInbound\b/.test(location.search) ||
-      /\bAction=AgentTicketPhone\b/.test(location.search) ||
-      /\bAction=AgentTicketForward\b/.test(location.search))) {
+  if (!(
+    /\bAction=AgentTicketCompose\b/.test(location.search) ||
+    /\bAction=AgentTicketEmail\b/.test(location.search) ||
+    /\bAction=AgentTicketEmailOutbound\b/.test(location.search) ||
+    /\bAction=AgentTicketPhoneOutbound\b/.test(location.search) ||
+    /\bAction=AgentTicketPhoneInbound\b/.test(location.search) ||
+    /\bAction=AgentTicketPhone\b/.test(location.search) ||
+    /\bAction=AgentTicketForward\b/.test(location.search)
+  )) {
     return;
   }
 
-  const PHY_DATA_URL = "https://grp_phy.gitlab-pages.uni-bonn.de/it/web/vcard_generator/contacts.json";
+  // ---------------------------
+  // Sources (extendable)
+  // ---------------------------
+  const SOURCES = {
+    phy: {
+      id: "phy",
+      // Higher priority wins if multiple sources provide the same email.
+      priority: 100,
+      // Cache TTL per source.
+      cacheTtlMs: 12 * 60 * 60 * 1000,
+      // Refresh lease TTL per source (slow sources may need minutes).
+      refreshLeaseTtlMs: 2 * 60 * 1000,
+      url: "https://grp_phy.gitlab-pages.uni-bonn.de/it/web/vcard_generator/contacts.json",
+
+      async fetch() {
+        const res = await fetch(this.url);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      },
+
+      transform(data, syncID) {
+        const entries = Object.values(data);
+        return entries.map(e => {
+          const email = (e.email || "").toLowerCase();
+          const text = `"${e.degree ? e.degree + " " : ""}${e.firstname || ""} ${e.lastname || ""}" <${email}>`
+            .replace(/\s+/g, " ")
+            .trim();
+          return {
+            key: `${email}|${this.id}`,  // composite key so multiple sources can coexist
+            email,
+            text,
+            search: text.toLowerCase(),
+            source: this.id,
+            syncID
+          };
+        }).filter(x => x.email);
+      }
+    }
+  };
+
+  // ---------------------------
+  // Storage / IPC constants
+  // ---------------------------
   const OLD_CACHE_KEY = "znuny_contacts_cache_v1";
+
   const DB_NAME = "ZnunyContactDB";
-  const DB_VERSION = 2;
-  const PHY_CACHE_TTL = 12 * 60 * 60 * 1000;
+  const DB_VERSION = 4; // bump due to schema change: contacts.key = `${email}|${source}`
 
-  // IDB-based refresh lease (cross-tab lock)
-  const PHY_REFRESH_LEASE_KEY = "phyRefreshLease";
-  const PHY_REFRESH_LEASE_TTL = 2 * 60 * 1000;
-
-  // Cross-tab broadcast (modern browsers)
-  const BC_NAME = "znuny_contacts_bc_v1";
+  const BC_NAME = "znuny_contacts_bc_v2";
   const bc = new BroadcastChannel(BC_NAME);
 
-  let contacts = [];
-  let cacheState = { hasAny: false, isStale: true, lastUpdate: 0 };
+  // ---------------------------
+  // In-memory state
+  // ---------------------------
+  let contacts = []; // effective list: unique by email, priority wins
+  let perSourceState = {}; // { [sourceId]: { hasAny, isStale, lastUpdate } }
   let autocompleteInstances = []; // { input, dropdown }
   let refreshInFlightLocal = false;
 
+  // ---------------------------
+  // Helpers
+  // ---------------------------
   function cleanupOldCache() {
     if (localStorage.getItem(OLD_CACHE_KEY)) {
       localStorage.removeItem(OLD_CACHE_KEY);
       console.log("[Autocomplete] Old localStorage cache cleared.");
     }
+  }
+
+  function metaKey(sourceId, field) {
+    return `meta:source:${sourceId}:${field}`; // field: lastUpdate | lease
   }
 
   function openDB() {
@@ -56,10 +105,12 @@
 
       request.onupgradeneeded = (event) => {
         const db = event.target.result;
+
         if (db.objectStoreNames.contains("contacts")) {
           db.deleteObjectStore("contacts");
         }
-        db.createObjectStore("contacts", { keyPath: "email" });
+        // store multiple entries per email (one per source)
+        db.createObjectStore("contacts", { keyPath: "key" });
 
         if (!db.objectStoreNames.contains("metadata")) {
           db.createObjectStore("metadata");
@@ -85,22 +136,23 @@
   async function setMeta(key, value) {
     const db = await openDB();
     const tx = db.transaction("metadata", "readwrite");
-    const store = tx.objectStore("metadata");
-    store.put(value, key);
+    tx.objectStore("metadata").put(value, key);
     return new Promise((resolve) => { tx.oncomplete = () => resolve(); });
   }
 
-  // One-readwrite-transaction lease acquisition to serialize refreshes across tabs.
-  async function tryAcquireRefreshLease() {
+  // One-readwrite-transaction lease acquisition to serialize refreshes across tabs (per source).
+  async function tryAcquireRefreshLease(sourceId) {
     const now = Date.now();
     const owner = `${now}-${Math.random().toString(16).slice(2)}`;
+    const leaseKey = metaKey(sourceId, "lease");
+    const leaseTtl = (SOURCES[sourceId]?.refreshLeaseTtlMs ?? (2 * 60 * 1000));
 
     const db = await openDB();
     const tx = db.transaction("metadata", "readwrite");
     const store = tx.objectStore("metadata");
 
     const current = await new Promise((resolve) => {
-      const req = store.get(PHY_REFRESH_LEASE_KEY);
+      const req = store.get(leaseKey);
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
     });
@@ -109,12 +161,11 @@
       return { ok: false, owner: current.owner };
     }
 
-    const lease = { owner, expiresAt: now + PHY_REFRESH_LEASE_TTL };
-    store.put(lease, PHY_REFRESH_LEASE_KEY);
+    store.put({ owner, expiresAt: now + leaseTtl }, leaseKey);
 
     return await new Promise((resolve) => {
       tx.oncomplete = async () => {
-        const verify = await getMeta(PHY_REFRESH_LEASE_KEY);
+        const verify = await getMeta(leaseKey);
         resolve({ ok: !!(verify && verify.owner === owner), owner });
       };
       tx.onerror = () => resolve({ ok: false, owner: null });
@@ -122,30 +173,28 @@
     });
   }
 
-  async function releaseRefreshLease(owner) {
-    const cur = await getMeta(PHY_REFRESH_LEASE_KEY);
+  async function releaseRefreshLease(sourceId, owner) {
+    const leaseKey = metaKey(sourceId, "lease");
+    const cur = await getMeta(leaseKey);
     if (cur && cur.owner === owner) {
-      await setMeta(PHY_REFRESH_LEASE_KEY, { owner: "", expiresAt: 0 });
+      await setMeta(leaseKey, { owner: "", expiresAt: 0 });
     }
   }
 
-  async function saveToIndexedDB(data) {
+  async function saveSourceToIndexedDB(sourceId, data) {
     const db = await openDB();
     const tx = db.transaction(["contacts", "metadata"], "readwrite");
     const contactStore = tx.objectStore("contacts");
     const metaStore = tx.objectStore("metadata");
 
-    // Use put to handle updates via email key, live incremental updates. Purge happens after sync.
     data.forEach(item => contactStore.put(item));
-    metaStore.put(Date.now(), "lastPhyUpdate");
+    metaStore.put(Date.now(), metaKey(sourceId, "lastUpdate"));
 
-    return new Promise((resolve) => {
-      tx.oncomplete = () => resolve();
-    });
+    return new Promise((resolve) => { tx.oncomplete = () => resolve(); });
   }
 
-  // Actual cleanup of older entries after full sync.
-  async function cleanupOldRecords(source, validSyncID) {
+  // Purge old entries of a single source after a successful full sync.
+  async function cleanupOldRecords(sourceId, validSyncID) {
     const db = await openDB();
     const tx = db.transaction("contacts", "readwrite");
     const store = tx.objectStore("contacts");
@@ -153,16 +202,34 @@
 
     request.onsuccess = (event) => {
       const cursor = event.target.result;
-      if (cursor) {
-        if (cursor.value.source === source && cursor.value.syncID !== validSyncID) {
-          cursor.delete();
-        }
-        cursor.continue();
+      if (!cursor) return;
+
+      if (cursor.value.source === sourceId && cursor.value.syncID !== validSyncID) {
+        cursor.delete();
       }
+      cursor.continue();
     };
   }
 
-  // Cache-first: always return whatever IDB has (even if stale), plus metadata about staleness.
+  // Collapse all per-source rows into an effective list unique by email (priority wins).
+  function buildEffectiveContacts(allRows) {
+    const bestByEmail = new Map(); // email -> row
+
+    for (const row of allRows) {
+      if (!row?.email) continue;
+      const cur = bestByEmail.get(row.email);
+      if (!cur) {
+        bestByEmail.set(row.email, row);
+        continue;
+      }
+      const pNew = SOURCES[row.source]?.priority ?? 0;
+      const pCur = SOURCES[cur.source]?.priority ?? 0;
+      if (pNew > pCur) bestByEmail.set(row.email, row);
+    }
+    return [...bestByEmail.values()];
+  }
+
+  // Load all contacts plus per-source staleness state.
   async function loadFromIndexedDBWithMeta() {
     try {
       const db = await openDB();
@@ -170,110 +237,108 @@
       const contactStore = tx.objectStore("contacts");
       const metaStore = tx.objectStore("metadata");
 
-      const lastPhyUpdate = await new Promise(res => {
-        const req = metaStore.get("lastPhyUpdate");
-        req.onsuccess = () => res(req.result || 0);
-        req.onerror = () => res(0);
-      });
-
       const allContacts = await new Promise((resolve) => {
         const req = contactStore.getAll();
         req.onsuccess = () => resolve(req.result || []);
         req.onerror = () => resolve([]);
       });
 
-      const hasAny = allContacts.length > 0;
-      const isStale = !lastPhyUpdate || (Date.now() - lastPhyUpdate > PHY_CACHE_TTL);
-      return { contacts: allContacts, meta: { lastPhyUpdate, hasAny, isStale } };
+      const state = {};
+      await Promise.all(Object.keys(SOURCES).map(async (sourceId) => {
+        const lastUpdate = await new Promise(res => {
+          const req = metaStore.get(metaKey(sourceId, "lastUpdate"));
+          req.onsuccess = () => res(req.result || 0);
+          req.onerror = () => res(0);
+        });
+
+        const hasAny = allContacts.some(c => c.source === sourceId);
+        const ttl = SOURCES[sourceId].cacheTtlMs;
+        const isStale = !lastUpdate || (Date.now() - lastUpdate > ttl);
+
+        state[sourceId] = { hasAny, isStale, lastUpdate };
+      }));
+
+      return { contacts: allContacts, state };
     } catch (e) {
       console.error("[Autocomplete] IDB Error:", e);
-      return { contacts: [], meta: { lastPhyUpdate: 0, hasAny: false, isStale: true } };
+      const state = {};
+      for (const sid of Object.keys(SOURCES)) state[sid] = { hasAny: false, isStale: true, lastUpdate: 0 };
+      return { contacts: [], state };
     }
   }
 
   async function reloadContactsFromIDB() {
-    const { contacts: c, meta } = await loadFromIndexedDBWithMeta();
-    contacts = c;
-    cacheState = { hasAny: meta.hasAny, isStale: meta.isStale, lastUpdate: meta.lastPhyUpdate };
-    console.log("[Autocomplete] IDB cache loaded:", contacts.length, "stale=", cacheState.isStale);
+    const { contacts: allRows, state } = await loadFromIndexedDBWithMeta();
+    perSourceState = state;
+    contacts = buildEffectiveContacts(allRows);
+    console.log("[Autocomplete] IDB cache loaded:", contacts.length, "effective entries");
   }
 
   function broadcastCacheUpdated() {
     bc.postMessage({ type: "cacheUpdated", ts: Date.now() });
   }
 
-  function updateAllDropdownsLoadingHint() {
-    for (const inst of autocompleteInstances) {
-      const input = inst.input;
-      const dropdown = inst.dropdown;
-      if (!input) continue;
-      const token = getCurrentToken(input.value, input.selectionStart).toLowerCase();
-      if (token.length >= 2) dropdown.render(queryMatches(token));
+  // ---------------------------
+  // Refresh logic
+  // ---------------------------
+  function anySourceNeedsRefresh() {
+    return Object.keys(SOURCES).some(sid => {
+      const s = perSourceState[sid];
+      return !s || !s.hasAny || s.isStale;
+    });
+  }
+
+  async function refreshSourceIfNeeded(sourceId) {
+    const src = SOURCES[sourceId];
+    const st = perSourceState[sourceId] || { hasAny: false, isStale: true };
+
+    if (st.hasAny && !st.isStale) return;
+
+    const lease = await tryAcquireRefreshLease(sourceId);
+    if (!lease.ok) return; // another tab is refreshing this source
+
+    try {
+      // Re-check after lease acquisition.
+      await reloadContactsFromIDB();
+      const st2 = perSourceState[sourceId] || { hasAny: false, isStale: true };
+      if (st2.hasAny && !st2.isStale) return;
+
+      const syncID = Date.now();
+      const raw = await src.fetch();
+      const fresh = src.transform(raw, syncID);
+
+      await saveSourceToIndexedDB(sourceId, fresh);
+      await cleanupOldRecords(sourceId, syncID);
+
+      console.log(`[Autocomplete] ${sourceId} refreshed:`, fresh.length);
+    } catch (e) {
+      console.error(`[Autocomplete] Error refreshing ${sourceId}:`, e);
+    } finally {
+      await releaseRefreshLease(sourceId, lease.owner);
     }
-  }
-
-  async function fetchPhyData() {
-    const res = await fetch(PHY_DATA_URL);
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    return res.json();
-  }
-
-  function transformPhy(data, syncID) {
-    const entries = Object.values(data);
-    return entries.map(e => {
-      const text = `"${e.degree ? e.degree + " " : ""}${e.firstname || ""} ${e.lastname || ""}" <${e.email || ""}>`
-        .replace(/\s+/g, ' ')
-        .trim();
-      const search = text.toLowerCase();
-      return {
-        email: (e.email || "").toLowerCase(),
-        text,
-        search,
-        source: 'phy',
-        syncID: syncID
-      };
-    }).filter(x => x.email); // keyPath must be present
   }
 
   async function backgroundRefreshIfNeeded() {
     if (refreshInFlightLocal) return;
-    if (cacheState.hasAny && !cacheState.isStale) return;
-
-    // If cache empty, let UI show "Loading..." while refresh is pending.
-    if (!cacheState.hasAny) updateAllDropdownsLoadingHint();
-
-    const lease = await tryAcquireRefreshLease();
-    if (!lease.ok) return; // another tab is refreshing
+    if (!anySourceNeedsRefresh()) return;
 
     refreshInFlightLocal = true;
-    if (!cacheState.hasAny) updateAllDropdownsLoadingHint();
-
     try {
-      // Re-check after lease acquisition: another tab may have refreshed just before we got the lease.
-      await reloadContactsFromIDB();
-      if (cacheState.hasAny && !cacheState.isStale) {
-        updateAllDropdownsLoadingHint();
-        return;
+      // Refresh sources sequentially to avoid hammering and to keep UI predictable.
+      for (const sid of Object.keys(SOURCES)) {
+        await refreshSourceIfNeeded(sid);
       }
-
-      const syncID = Date.now();
-      const data = await fetchPhyData();
-      const fresh = transformPhy(data, syncID);
-      await saveToIndexedDB(fresh);
-      await cleanupOldRecords('phy', syncID);
-      console.log("[Autocomplete] PHY Data refreshed and stored in IDB");
-
       broadcastCacheUpdated();
-      await reloadContactsFromIDB(); // update current tab too
+      await reloadContactsFromIDB();
       updateAllDropdownsLoadingHint();
-    } catch (e) {
-      console.error("[Autocomplete] Error refreshing data:", e);
     } finally {
       refreshInFlightLocal = false;
-      await releaseRefreshLease(lease.owner);
     }
   }
 
+  // ---------------------------
+  // Autocomplete UI
+  // ---------------------------
   function getCurrentToken(value, cursorPos) {
     return value.slice(0, cursorPos).split(",").pop().trim();
   }
@@ -320,6 +385,7 @@
     function render(matches) {
       box.innerHTML = "";
       selectedIndex = -1;
+
       matches.forEach(m => {
         const el = document.createElement("div");
         el.textContent = m.text;
@@ -337,6 +403,7 @@
         }
         box.appendChild(el);
       });
+
       position();
       box.style.display = matches.length ? "block" : "none";
     }
@@ -374,11 +441,21 @@
       .slice(0, 10)
       .map(c => ({ text: c.text }));
 
-    // Show dropdown entry while cache is empty and being filled.
-    if (!cacheState.hasAny && (refreshInFlightLocal || cacheState.isStale)) {
+    const anyMissing = Object.keys(SOURCES).some(sid => !(perSourceState[sid]?.hasAny));
+    if (anyMissing && refreshInFlightLocal) {
       matches.unshift({ text: "Loading contacts… (cache is being filled)", disabled: true });
     }
     return matches;
+  }
+
+  function updateAllDropdownsLoadingHint() {
+    for (const inst of autocompleteInstances) {
+      const input = inst.input;
+      const dropdown = inst.dropdown;
+      if (!input) continue;
+      const token = getCurrentToken(input.value, input.selectionStart).toLowerCase();
+      if (token.length >= 2) dropdown.render(queryMatches(token));
+    }
   }
 
   function attachAutocomplete(input) {
@@ -403,6 +480,7 @@
         dropdown.move(-1);
         e.preventDefault();
       } else if (e.key === "Enter") {
+        // Choose if the dropdown is visible (heuristic).
         if (document.querySelector('[style*="display: block"]')) {
           dropdown.choose();
           e.preventDefault();
@@ -422,7 +500,6 @@
       if (ev?.data?.type === "cacheUpdated") {
         await reloadContactsFromIDB();
         updateAllDropdownsLoadingHint();
-        // Ensures this tab doesn't decide to refresh based on outdated local state.
         backgroundRefreshIfNeeded();
       }
     };
@@ -439,7 +516,7 @@
       attachAutocomplete(document.getElementById(id));
     });
 
-    // Background refresh if cache missing or stale (serialized via IDB refresh lease).
+    // Background refresh if any source missing or stale (serialized per-source via leases).
     backgroundRefreshIfNeeded();
   }
 

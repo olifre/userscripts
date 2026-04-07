@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name        Znuny: Contact Autocomplete (multi-source, priority + per-source TTL/lease)
+// @name        Znuny: Contact Autocomplete (multi-source)
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-pi-members.user.js
-// @version     1.3.0
+// @version     1.3.2
 // @grant       none
 // @description Autocomplete for Znuny contacts based on multiple sources (priority on collisions)
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
@@ -32,11 +32,8 @@
   const SOURCES = {
     phy: {
       id: "phy",
-      // Higher priority wins if multiple sources provide the same email.
       priority: 100,
-      // Cache TTL per source.
       cacheTtlMs: 12 * 60 * 60 * 1000,
-      // Refresh lease TTL per source (slow sources may need minutes).
       refreshLeaseTtlMs: 2 * 60 * 1000,
       url: "https://grp_phy.gitlab-pages.uni-bonn.de/it/web/vcard_generator/contacts.json",
 
@@ -54,7 +51,7 @@
             .replace(/\s+/g, " ")
             .trim();
           return {
-            key: `${email}|${this.id}`,  // composite key so multiple sources can coexist
+            key: `${email}|${this.id}`,
             email,
             text,
             search: text.toLowerCase(),
@@ -72,7 +69,7 @@
   const OLD_CACHE_KEY = "znuny_contacts_cache_v1";
 
   const DB_NAME = "ZnunyContactDB";
-  const DB_VERSION = 4; // bump due to schema change: contacts.key = `${email}|${source}`
+  const DB_VERSION = 4;
 
   const BC_NAME = "znuny_contacts_bc_v2";
   const bc = new BroadcastChannel(BC_NAME);
@@ -82,8 +79,64 @@
   // ---------------------------
   let contacts = []; // effective list: unique by email, priority wins
   let perSourceState = {}; // { [sourceId]: { hasAny, isStale, lastUpdate } }
+  let perSourceCounts = {}; // { [sourceId]: number of raw rows in IDB for that source }
   let autocompleteInstances = []; // { input, dropdown }
   let refreshInFlightLocal = false;
+
+  // ---------------------------
+  // Status UI
+  // ---------------------------
+  let statusBox = null;
+
+  function ensureStatusBox() {
+    if (statusBox) return statusBox;
+
+    const box = document.createElement("div");
+    statusBox = box;
+    box.id = "znunyContactSourceStatus";
+
+    Object.assign(box.style, {
+      position: "fixed",
+      top: "8px",
+      left: "50%",
+      transform: "translateX(-50%)",
+      zIndex: 100000,
+      background: "rgba(255,255,255,0.97)",
+      border: "1px solid #bbb",
+      borderRadius: "6px",
+      padding: "6px 10px",
+      boxShadow: "0 4px 10px rgba(0,0,0,0.15)",
+      fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
+      fontSize: "12px",
+      color: "#111",
+      minWidth: "360px",
+      maxWidth: "720px",
+      pointerEvents: "none",
+      whiteSpace: "pre"
+    });
+
+    document.body.appendChild(box);
+    return box;
+  }
+
+  function fmtIso(ts) {
+    if (!ts) return "never";
+    try { return new Date(ts).toISOString(); } catch { return "invalid"; }
+  }
+
+  function statusLine(sourceId) {
+    const s = perSourceState[sourceId] || { hasAny: false, isStale: true, lastUpdate: 0 };
+    const n = perSourceCounts[sourceId] ?? 0;
+    const freshness = s.hasAny ? (s.isStale ? "stale" : "fresh") : "empty";
+    const fetching = refreshInFlightLocal && (s.isStale || !s.hasAny) ? " (refreshing…)" : "";
+    return `${sourceId}: ${freshness}${fetching} | contacts: ${n} | last fetch: ${fmtIso(s.lastUpdate)}`;
+  }
+
+  function updateStatusBox() {
+    const box = ensureStatusBox();
+    const lines = Object.keys(SOURCES).map(statusLine);
+    box.textContent = lines.join("\n");
+  }
 
   // ---------------------------
   // Helpers
@@ -109,7 +162,6 @@
         if (db.objectStoreNames.contains("contacts")) {
           db.deleteObjectStore("contacts");
         }
-        // store multiple entries per email (one per source)
         db.createObjectStore("contacts", { keyPath: "key" });
 
         if (!db.objectStoreNames.contains("metadata")) {
@@ -140,7 +192,7 @@
     return new Promise((resolve) => { tx.oncomplete = () => resolve(); });
   }
 
-  // One-readwrite-transaction lease acquisition to serialize refreshes across tabs (per source).
+  // Per-source refresh lease (cross-tab lock).
   async function tryAcquireRefreshLease(sourceId) {
     const now = Date.now();
     const owner = `${now}-${Math.random().toString(16).slice(2)}`;
@@ -193,7 +245,6 @@
     return new Promise((resolve) => { tx.oncomplete = () => resolve(); });
   }
 
-  // Purge old entries of a single source after a successful full sync.
   async function cleanupOldRecords(sourceId, validSyncID) {
     const db = await openDB();
     const tx = db.transaction("contacts", "readwrite");
@@ -211,7 +262,6 @@
     };
   }
 
-  // Collapse all per-source rows into an effective list unique by email (priority wins).
   function buildEffectiveContacts(allRows) {
     const bestByEmail = new Map(); // email -> row
 
@@ -226,10 +276,10 @@
       const pCur = SOURCES[cur.source]?.priority ?? 0;
       if (pNew > pCur) bestByEmail.set(row.email, row);
     }
+
     return [...bestByEmail.values()];
   }
 
-  // Load all contacts plus per-source staleness state.
   async function loadFromIndexedDBWithMeta() {
     try {
       const db = await openDB();
@@ -244,6 +294,7 @@
       });
 
       const state = {};
+      const counts = {};
       await Promise.all(Object.keys(SOURCES).map(async (sourceId) => {
         const lastUpdate = await new Promise(res => {
           const req = metaStore.get(metaKey(sourceId, "lastUpdate"));
@@ -251,26 +302,32 @@
           req.onerror = () => res(0);
         });
 
-        const hasAny = allContacts.some(c => c.source === sourceId);
+        const n = allContacts.reduce((acc, c) => acc + (c.source === sourceId ? 1 : 0), 0);
+        counts[sourceId] = n;
+        const hasAny = n > 0;
         const ttl = SOURCES[sourceId].cacheTtlMs;
         const isStale = !lastUpdate || (Date.now() - lastUpdate > ttl);
 
         state[sourceId] = { hasAny, isStale, lastUpdate };
       }));
 
-      return { contacts: allContacts, state };
+      return { contacts: allContacts, state, counts };
     } catch (e) {
       console.error("[Autocomplete] IDB Error:", e);
       const state = {};
+      const counts = {};
       for (const sid of Object.keys(SOURCES)) state[sid] = { hasAny: false, isStale: true, lastUpdate: 0 };
-      return { contacts: [], state };
+      for (const sid of Object.keys(SOURCES)) counts[sid] = 0;
+      return { contacts: [], state, counts };
     }
   }
 
   async function reloadContactsFromIDB() {
-    const { contacts: allRows, state } = await loadFromIndexedDBWithMeta();
+    const { contacts: allRows, state, counts } = await loadFromIndexedDBWithMeta();
     perSourceState = state;
+    perSourceCounts = counts;
     contacts = buildEffectiveContacts(allRows);
+    updateStatusBox();
     console.log("[Autocomplete] IDB cache loaded:", contacts.length, "effective entries");
   }
 
@@ -290,7 +347,7 @@
 
   async function refreshSourceIfNeeded(sourceId) {
     const src = SOURCES[sourceId];
-    const st = perSourceState[sourceId] || { hasAny: false, isStale: true };
+    const st = perSourceState[sourceId] || { hasAny: false, isStale: true, lastUpdate: 0 };
 
     if (st.hasAny && !st.isStale) return;
 
@@ -298,12 +355,12 @@
     if (!lease.ok) return; // another tab is refreshing this source
 
     try {
-      // Re-check after lease acquisition.
       await reloadContactsFromIDB();
-      const st2 = perSourceState[sourceId] || { hasAny: false, isStale: true };
+      const st2 = perSourceState[sourceId] || { hasAny: false, isStale: true, lastUpdate: 0 };
       if (st2.hasAny && !st2.isStale) return;
 
       const syncID = Date.now();
+
       const raw = await src.fetch();
       const fresh = src.transform(raw, syncID);
 
@@ -323,8 +380,9 @@
     if (!anySourceNeedsRefresh()) return;
 
     refreshInFlightLocal = true;
+    updateStatusBox();
+
     try {
-      // Refresh sources sequentially to avoid hammering and to keep UI predictable.
       for (const sid of Object.keys(SOURCES)) {
         await refreshSourceIfNeeded(sid);
       }
@@ -333,6 +391,7 @@
       updateAllDropdownsLoadingHint();
     } finally {
       refreshInFlightLocal = false;
+      updateStatusBox();
     }
   }
 
@@ -480,7 +539,6 @@
         dropdown.move(-1);
         e.preventDefault();
       } else if (e.key === "Enter") {
-        // Choose if the dropdown is visible (heuristic).
         if (document.querySelector('[style*="display: block"]')) {
           dropdown.choose();
           e.preventDefault();
@@ -507,16 +565,16 @@
 
   async function init() {
     cleanupOldCache();
+    ensureStatusBox();
+    updateStatusBox();
     setupCrossTabListeners();
 
-    // Cache-first: load whatever is available immediately (even if stale).
     await reloadContactsFromIDB();
 
     ["FromCustomer", "ToCustomer", "CcCustomer", "BccCustomer"].forEach(id => {
       attachAutocomplete(document.getElementById(id));
     });
 
-    // Background refresh if any source missing or stale (serialized per-source via leases).
     backgroundRefreshIfNeeded();
   }
 

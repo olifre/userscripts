@@ -3,7 +3,7 @@
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-pi-members.user.js
-// @version     1.0.2
+// @version     1.0.3
 // @grant       none
 // @description Autocomplete for Znuny contacts based on public Physics institute member data
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
@@ -19,6 +19,7 @@
       /\bAction=AgentTicketEmailOutbound\b/.test (location.search) ||
       /\bAction=AgentTicketPhoneOutbound\b/.test (location.search) ||
       /\bAction=AgentTicketPhoneInbound\b/.test (location.search) ||
+      /\bAction=AgentTicketPhone\b/.test (location.search) ||
       /\bAction=AgentTicketForward\b/.test (location.search) )) {
       	return;
   }
@@ -234,7 +235,7 @@
   async function init() {
     await loadData();
 
-    ["ToCustomer", "CcCustomer", "BccCustomer"].forEach(id => {
+    ["FromCustomer", "ToCustomer", "CcCustomer", "BccCustomer"].forEach(id => {
       attachAutocomplete(document.getElementById(id));
     });
   }

@@ -3,7 +3,7 @@
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
-// @version     1.4.0
+// @version     1.4.1
 // @grant       none
 // @description Autocomplete for Znuny contacts based on multiple sources (priority on collisions)
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
@@ -549,7 +549,27 @@
 
       matches.forEach(m => {
         const el = document.createElement("div");
-        el.textContent = m.text;
+        el.dataset.value = m.text;
+        el.style.display = "flex";
+        el.style.alignItems = "baseline";
+        el.style.gap = "8px";
+
+        const main = document.createElement("span");
+        main.textContent = m.text;
+        main.style.flex = "1 1 auto";
+        main.style.minWidth = "0";
+
+        el.appendChild(main);
+
+        if (m.source) {
+          const src = document.createElement("span");
+          src.textContent = m.source;
+          src.style.flex = "0 0 auto";
+          src.style.marginLeft = "auto";
+          src.style.fontStyle = "italic";
+          src.style.color = "#666";
+          el.appendChild(src);
+        }
         el.style.padding = "4px";
         el.style.cursor = m.disabled ? "default" : "pointer";
         el.style.color = m.disabled ? "#666" : "#000";
@@ -582,7 +602,7 @@
       if (selectedIndex >= 0) {
         const el = box.children[selectedIndex];
         if (el && el.style.cursor === "pointer") {
-          replaceCurrentToken(input, el.textContent);
+          replaceCurrentToken(input, el.dataset.value || el.textContent);
           hide();
         }
       }
@@ -600,7 +620,7 @@
     const matches = contacts
       .filter(c => c.search.includes(tokenLower))
       .slice(0, 10)
-      .map(c => ({ text: c.text }));
+      .map(c => ({ text: c.text, source: c.source }));
 
     const anyMissing = Object.keys(SOURCES).some(sid => !(perSourceState[sid]?.hasAny));
     if (anyMissing && refreshInFlightLocal) {

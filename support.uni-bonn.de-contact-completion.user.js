@@ -3,7 +3,7 @@
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
-// @version     1.4.1
+// @version     1.4.2
 // @grant       none
 // @description Autocomplete for Znuny contacts based on multiple sources (priority on collisions)
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
@@ -217,8 +217,13 @@
     const n = perSourceCounts[sourceId] ?? 0;
     const p = perSourceProgress[sourceId] || { fetched: 0 };
     const freshness = s.hasAny ? (s.isStale ? "stale" : "fresh") : "empty";
-    const fetching = refreshInFlightLocal && (s.isStale || !s.hasAny) ? " (refreshing…)" : "";
-    return `${sourceId}: ${freshness}${fetching} | contacts: ${n} | fetch: ${p.fetched ?? 0} | last fetch: ${fmtIso(s.lastUpdate)}`;
+
+    // Show fetch progress only while actively refreshing
+    const refreshing = refreshInFlightLocal && (s.isStale || !s.hasAny);
+    const fetchingText = refreshing ? " (refreshing…)" : "";
+    const fetchPart = refreshing ? ` | fetch: ${p.fetched ?? 0}` : "";
+
+    return `${sourceId}: ${freshness}${fetchingText}${fetchPart} | contacts: ${n} | last fetch: ${fmtIso(s.lastUpdate)}`;
   }
 
   function updateStatusBox() {

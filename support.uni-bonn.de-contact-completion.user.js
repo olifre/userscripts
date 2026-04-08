@@ -3,7 +3,7 @@
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
-// @version     1.4.3
+// @version     1.4.4
 // @grant       none
 // @description Autocomplete for Znuny contacts based on multiple sources (priority on collisions)
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
@@ -74,7 +74,7 @@
     jira: {
       id: "jira",
       priority: 50, // lower than phy
-      cacheTtlMs: 6 * 60 * 60 * 1000,
+      cacheTtlMs: 24 * 60 * 60 * 1000,
       refreshLeaseTtlMs: 2 * 60 * 1000,
       url: "https://jira.team.uni-bonn.de/rest/api/2/user/list",
       batchSize: 2000,

@@ -3,7 +3,7 @@
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
-// @version     1.4.4
+// @version     1.4.5
 // @grant       none
 // @description Autocomplete for Znuny contacts based on multiple sources (priority on collisions)
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
@@ -32,6 +32,9 @@
 
   // In-memory progress tracking (per source)
   const perSourceProgress = {}; // { [sourceId]: { fetched } }
+
+  // In-memory last error (per source)
+  const perSourceError = {}; // { [sourceId]: { message: string, ts: number } }
 
   // Broadcast channel and helper
   const BC_NAME = "znuny_contacts_bc_v2";
@@ -203,6 +206,34 @@
     try { return new Date(ts).toISOString(); } catch { return "invalid"; }
   }
 
+  function setSourceError(sourceId, message) {
+    perSourceError[sourceId] = { message: String(message || ""), ts: Date.now() };
+    updateStatusBox();
+  }
+
+  function clearSourceError(sourceId) {
+    if (perSourceError[sourceId]?.message) {
+      perSourceError[sourceId] = { message: "", ts: 0 };
+      updateStatusBox();
+    }
+  }
+
+  function classifyError(e) {
+    const msg = String(e?.message || e || "");
+
+    // Our fetch() code throws Error("HTTP " + status)
+    const m = msg.match(/^HTTP\s+(\d{3})/);
+    if (m) {
+      const code = Number(m[1]);
+      if (code === 401 || code === 403) return "authentication required";
+      return `HTTP ${code}`;
+    }
+
+    // Network-ish errors (browser dependent)
+    if (/failed to fetch|networkerror|load failed|fetch/i.test(msg)) return "network error";
+    return msg || "unknown error";
+  }
+
   function statusLine(sourceId) {
     const s = perSourceState[sourceId] || { hasAny: false, isStale: true, lastUpdate: 0 };
     const n = perSourceCounts[sourceId] ?? 0;
@@ -214,7 +245,10 @@
     const fetchingText = refreshing ? " (refreshing…)" : "";
     const fetchPart = refreshing ? ` | fetch: ${p.fetched ?? 0}` : "";
 
-    return `${sourceId}: ${freshness}${fetchingText}${fetchPart} | contacts: ${n} | last fetch: ${fmtIso(s.lastUpdate)}`;
+    const err = perSourceError[sourceId]?.message;
+    const errPart = err ? ` | error: ${err}` : "";
+
+    return `${sourceId}: ${freshness}${fetchingText}${fetchPart} | contacts: ${n} | last fetch: ${fmtIso(s.lastUpdate)}${errPart}`;
   }
 
   function updateStatusBox() {
@@ -397,6 +431,7 @@
         const isStale = !lastUpdate || (Date.now() - lastUpdate > ttl);
 
         state[sourceId] = { hasAny, isStale, lastUpdate };
+
         // initialize progress tracking
         perSourceProgress[sourceId] = perSourceProgress[sourceId] || { fetched: 0 };
       }));
@@ -408,6 +443,7 @@
       const counts = {};
       for (const sid of Object.keys(SOURCES)) state[sid] = { hasAny: false, isStale: true, lastUpdate: 0 };
       for (const sid of Object.keys(SOURCES)) counts[sid] = 0;
+
       // initialize progress placeholders
       Object.keys(SOURCES).forEach(sid => perSourceProgress[sid] = { fetched: 0 });
       return { contacts: [], state, counts };
@@ -419,10 +455,12 @@
     perSourceState = state;
     perSourceCounts = counts;
     contacts = buildEffectiveContacts(allRows);
+
     // reset per-source progress for fresh UI state
     Object.keys(SOURCES).forEach(sid => {
       perSourceProgress[sid] = perSourceProgress[sid] || { fetched: 0 };
     });
+
     updateStatusBox();
     console.log("[Autocomplete] IDB cache loaded:", contacts.length, "effective entries");
   }
@@ -463,8 +501,11 @@
       await saveSourceToIndexedDB(sourceId, fresh);
       await cleanupOldRecords(sourceId, syncID);
 
+      clearSourceError(sourceId); // success clears error
       console.log(`[Autocomplete] ${sourceId} refreshed:`, fresh.length);
     } catch (e) {
+      // Show error in status line and keep using stale cache
+      setSourceError(sourceId, classifyError(e));
       console.error(`[Autocomplete] Error refreshing ${sourceId}:`, e);
     } finally {
       await releaseRefreshLease(sourceId, lease.owner);

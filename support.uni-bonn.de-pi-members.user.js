@@ -2,7 +2,7 @@
 // @name        Znuny: Contact Autocomplete (multi-source)
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
-// @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
+// @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-pi-members.user.js
 // @version     1.3.2
 // @grant       none
 // @description Autocomplete for Znuny contacts based on multiple sources (priority on collisions)

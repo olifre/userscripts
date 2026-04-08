@@ -20,7 +20,7 @@ which replaces parts of the reply template.
 [![Install directly](https://img.shields.io/badge/Install%20directly%20with-any%20Monkey-285959.svg)](https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-pi-members.user.js)
 
 Uses public information from the member list of "Physikalisches Institut, Universität Bonn" for autocompletion in To, Cc and Bcc fields.
-Update URL redirects to the successor script below!
+You should switch to the successor script listed below!
 
 ## support.uni-bonn.de: Contact autocompletion
 [![Install directly](https://img.shields.io/badge/Install%20directly%20with-any%20Monkey-285959.svg)](https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js)

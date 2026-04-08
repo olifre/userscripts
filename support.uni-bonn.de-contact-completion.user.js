@@ -3,7 +3,7 @@
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
-// @version     1.4.2
+// @version     1.4.3
 // @grant       none
 // @description Autocomplete for Znuny contacts based on multiple sources (priority on collisions)
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
@@ -80,12 +80,10 @@
       batchSize: 2000,
 
       async fetch() {
-        // Sleep helper
-        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        // Start from scratch for Jira (do not persist resume cursors)
+        let cursor = 0;
 
-        // Start at last saved cursor (default 0)
-        const lastCursorVal = await getMeta(metaKey(this.id, "cursor"));
-        let cursor = (typeof lastCursorVal === "number" ? lastCursorVal : 0);
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
         const results = [];
         let totalFetched = 0;
@@ -108,24 +106,17 @@
           perSourceProgress[this.id] = { fetched: totalFetched };
           updateStatusBox();
 
-          // Persist next cursor for resuming
-          // handle nextCursor which may be a string
+          // Determine next cursor, but do not persist it
           const nc = json.nextCursor;
           const nextCursorNum = (typeof nc === "number") ? nc : (typeof nc === "string" ? Number(nc) : NaN);
           if (!Number.isNaN(nextCursorNum)) {
             cursor = nextCursorNum;
-            await setMeta(metaKey(this.id, "cursor"), cursor);
           }
 
           if (json.isLast) isDone = true;
 
           // Sleep a bit to be gentle between requests (as requested)
           await sleep(200);
-        }
-
-        // After all pages fetched, broadcast once
-        if (results.length > 0) {
-          broadcastCacheUpdated();
         }
 
         // Final progress
@@ -490,9 +481,8 @@
     try {
       for (const sid of Object.keys(SOURCES)) {
         await refreshSourceIfNeeded(sid);
+        broadcastCacheUpdated();
       }
-      // Broadcast only after all sources finished refreshing
-      broadcastCacheUpdated();
       await reloadContactsFromIDB();
       updateAllDropdownsLoadingHint();
     } finally {

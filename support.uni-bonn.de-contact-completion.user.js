@@ -4,7 +4,7 @@
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
 // @downloadURL https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
-// @version     1.4.9
+// @version     1.5.0
 // @grant       GM_xmlhttpRequest
 // @grant       GM.xmlHttpRequest
 // @connect     jira.team.uni-bonn.de
@@ -205,9 +205,9 @@
       fontSize: "12px",
       color: "#111",
       minWidth: "360px",
-      maxWidth: "720px",
-      pointerEvents: "none",
-      whiteSpace: "pre"
+      maxWidth: "900px",
+      pointerEvents: "auto",
+      whiteSpace: "normal"
     });
 
     document.body.appendChild(box);
@@ -321,10 +321,56 @@
     return `${sourceId}: ${freshness}${fetchingText}${fetchPart} | contacts: ${n} | last fetch: ${fmtIso(s.lastUpdate)}${holdPart}${errPart}`;
   }
 
+  async function forceStaleAndRefresh(sourceId) {
+    // Mark stale
+    await setMeta(metaKey(sourceId, "lastUpdate"), 0);
+
+    // Clear "blocked" states immediately
+    clearSourceHoldoff(sourceId);
+    clearSourceError(sourceId);
+
+    await reloadContactsFromIDB();
+    backgroundRefreshIfNeeded();
+  }
+
   function updateStatusBox() {
     const box = ensureStatusBox();
-    const lines = Object.keys(SOURCES).map(statusLine);
-    box.textContent = lines.join("\n");
+    box.innerHTML = "";
+
+    for (const sid of Object.keys(SOURCES)) {
+      const row = document.createElement("div");
+      row.style.display = "flex";
+      row.style.gap = "8px";
+      row.style.alignItems = "baseline";
+
+      const line = document.createElement("span");
+      line.textContent = statusLine(sid);
+      line.style.whiteSpace = "pre";
+      line.style.flex = "1 1 auto";
+      line.style.minWidth = "0";
+
+      const a = document.createElement("a");
+      a.href = "#";
+      a.textContent = "⟳";
+      a.title = `Force refresh ${sid}`;
+      a.style.flex = "0 0 auto";
+      a.style.textDecoration = "none";
+      a.style.fontWeight = "600";
+      a.style.color = "#0645ad";
+      a.style.pointerEvents = "auto";
+
+      a.addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        const old = a.textContent;
+        a.textContent = "…";
+        try { await forceStaleAndRefresh(sid); }
+        finally { a.textContent = old; }
+      });
+
+      row.appendChild(line);
+      row.appendChild(a);
+      box.appendChild(row);
+    }
   }
 
   // Update countdown once per second (also do a final update when a hold-off just ended)

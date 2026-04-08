@@ -4,7 +4,7 @@
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
 // @downloadURL https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
-// @version     1.5.0
+// @version     1.5.2
 // @grant       GM_xmlhttpRequest
 // @grant       GM.xmlHttpRequest
 // @connect     jira.team.uni-bonn.de
@@ -49,6 +49,9 @@
 
   // In-memory: whether this tab is actively refreshing a given source
   const perSourceRefreshing = {}; // { [sourceId]: boolean }
+
+  // In-memory: another tab holds the refresh lease (per source)
+  const perSourceLeaseBlockedBy = {}; // { [sourceId]: string|null }
 
   // Broadcast channel and helper
   const BC_NAME = "znuny_contacts_bc_v2";
@@ -318,7 +321,10 @@
     const err = perSourceError[sourceId]?.message;
     const errPart = err ? ` | error: ${err}` : "";
 
-    return `${sourceId}: ${freshness}${fetchingText}${fetchPart} | contacts: ${n} | last fetch: ${fmtIso(s.lastUpdate)}${holdPart}${errPart}`;
+    const blockedBy = perSourceLeaseBlockedBy[sourceId];
+    const lockPart = blockedBy ? ` | locked (other tab)` : "";
+
+    return `${sourceId}: ${freshness}${fetchingText}${fetchPart} | contacts: ${n} | last fetch: ${fmtIso(s.lastUpdate)}${holdPart}${lockPart}${errPart}`;
   }
 
   async function forceStaleAndRefresh(sourceId) {
@@ -601,6 +607,7 @@
         perSourceProgress[sourceId] = perSourceProgress[sourceId] || { fetched: 0 };
         perSourceRefreshing[sourceId] = perSourceRefreshing[sourceId] || false;
         perSourceHoldoffUntil[sourceId] = perSourceHoldoffUntil[sourceId] || 0;
+        perSourceLeaseBlockedBy[sourceId] = perSourceLeaseBlockedBy[sourceId] || null;
       }));
 
       return { contacts: allContacts, state, counts };
@@ -615,6 +622,7 @@
         perSourceProgress[sid] = { fetched: 0 };
         perSourceRefreshing[sid] = false;
         perSourceHoldoffUntil[sid] = perSourceHoldoffUntil[sid] || 0;
+        perSourceLeaseBlockedBy[sid] = perSourceLeaseBlockedBy[sid] || null;
       });
       return { contacts: [], state, counts };
     }
@@ -630,6 +638,7 @@
       perSourceProgress[sid] = perSourceProgress[sid] || { fetched: 0 };
       perSourceRefreshing[sid] = perSourceRefreshing[sid] || false;
       perSourceHoldoffUntil[sid] = perSourceHoldoffUntil[sid] || 0;
+      perSourceLeaseBlockedBy[sid] = perSourceLeaseBlockedBy[sid] || null;
     });
 
     updateStatusBox();
@@ -663,9 +672,13 @@
       return;
     }
 
+    perSourceLeaseBlockedBy[sourceId] = null;
+
     const lease = await tryAcquireRefreshLease(sourceId);
     if (!lease.ok) {
       perSourceRefreshing[sourceId] = false;
+      perSourceLeaseBlockedBy[sourceId] = lease.owner || "other";
+      updateStatusBox();
       return;
     }
 
@@ -700,6 +713,7 @@
       }
     } finally {
       perSourceRefreshing[sourceId] = false;
+      perSourceLeaseBlockedBy[sourceId] = null;
       updateStatusBox();
       await releaseRefreshLease(sourceId, lease.owner);
     }
@@ -907,6 +921,8 @@
   function setupCrossTabListeners() {
     bc.onmessage = async (ev) => {
       if (ev?.data?.type === "cacheUpdated") {
+        // Locks might be gone, re-check.
+        Object.keys(SOURCES).forEach(sid => { perSourceLeaseBlockedBy[sid] = null; });
         await reloadContactsFromIDB();
         updateAllDropdownsLoadingHint();
         backgroundRefreshIfNeeded();

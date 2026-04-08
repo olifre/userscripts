@@ -3,8 +3,12 @@
 // @namespace   github.com/olifre/userstyles
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
-// @version     1.4.5
-// @grant       none
+// @downloadURL https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
+// @version     1.4.8
+// @grant       GM_xmlhttpRequest
+// @grant       GM.xmlHttpRequest
+// @connect     jira.team.uni-bonn.de
+// @connect     grp_phy.gitlab-pages.uni-bonn.de
 // @description Autocomplete for Znuny contacts based on multiple sources (priority on collisions)
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)
 // @license     Unlicense
@@ -36,6 +40,13 @@
   // In-memory last error (per source)
   const perSourceError = {}; // { [sourceId]: { message: string, ts: number } }
 
+  // In-memory hold-off after network/auth errors (per source, per tab)
+  const perSourceHoldoffUntil = {}; // { [sourceId]: number (ts ms) }
+  const HOLDOFF_MS = 60 * 1000;
+
+  // In-memory: whether this tab is actively refreshing a given source
+  const perSourceRefreshing = {}; // { [sourceId]: boolean }
+
   // Broadcast channel and helper
   const BC_NAME = "znuny_contacts_bc_v2";
   const bc = new BroadcastChannel(BC_NAME);
@@ -49,9 +60,8 @@
       url: "https://grp_phy.gitlab-pages.uni-bonn.de/it/web/vcard_generator/contacts.json",
 
       async fetch() {
-        const res = await fetch(this.url);
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        return res.json();
+        const data = await xFetchJson(this.url);
+        return data;
       },
 
       transform(data, syncID) {
@@ -82,8 +92,7 @@
       url: "https://jira.team.uni-bonn.de/rest/api/2/user/list",
       batchSize: 2000,
 
-      async fetch() {
-        // Start from scratch for Jira (do not persist resume cursors)
+      async fetch() {        // Start from scratch for Jira (do not persist resume cursors)
         let cursor = 0;
 
         const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -92,19 +101,21 @@
         let totalFetched = 0;
         let isDone = false;
 
+        // Make sure the UI shows "refreshing" while we are inside this loop.
+        perSourceRefreshing[this.id] = true;
+        updateStatusBox();
+
         while (!isDone) {
           const u = new URL(this.url);
           u.searchParams.set("cursor", cursor);
           u.searchParams.set("maxResults", this.batchSize);
 
-          const res = await fetch(u.toString(), { credentials: "include" });
-          if (!res.ok) throw new Error("HTTP " + res.status);
-          const json = await res.json();
+          const json = await xFetchJson(u.toString(), { withCredentials: true });
 
           const batch = Array.isArray(json.values) ? json.values : [];
           results.push(...batch);
 
-          // Incremental progress for status box
+          // Update every successful batch (= every 2000, except maybe the last one)
           totalFetched += batch.length;
           perSourceProgress[this.id] = { fetched: totalFetched };
           updateStatusBox();
@@ -122,7 +133,6 @@
           await sleep(200);
         }
 
-        // Final progress
         perSourceProgress[this.id] = { fetched: totalFetched };
         updateStatusBox();
 
@@ -206,6 +216,28 @@
     try { return new Date(ts).toISOString(); } catch { return "invalid"; }
   }
 
+  function fmtRemaining(ms) {
+    const s = Math.ceil(ms / 1000);
+    return `${s}s`;
+  }
+
+  function holdoffRemainingMs(sourceId) {
+    const until = perSourceHoldoffUntil[sourceId] || 0;
+    return Math.max(0, until - Date.now());
+  }
+
+  function setSourceHoldoff(sourceId, ms = HOLDOFF_MS) {
+    perSourceHoldoffUntil[sourceId] = Date.now() + ms;
+    updateStatusBox();
+  }
+
+  function clearSourceHoldoff(sourceId) {
+    if (perSourceHoldoffUntil[sourceId]) {
+      perSourceHoldoffUntil[sourceId] = 0;
+      updateStatusBox();
+    }
+  }
+
   function setSourceError(sourceId, message) {
     perSourceError[sourceId] = { message: String(message || ""), ts: Date.now() };
     updateStatusBox();
@@ -221,7 +253,6 @@
   function classifyError(e) {
     const msg = String(e?.message || e || "");
 
-    // Our fetch() code throws Error("HTTP " + status)
     const m = msg.match(/^HTTP\s+(\d{3})/);
     if (m) {
       const code = Number(m[1]);
@@ -229,9 +260,23 @@
       return `HTTP ${code}`;
     }
 
-    // Network-ish errors (browser dependent)
-    if (/failed to fetch|networkerror|load failed|fetch/i.test(msg)) return "network error";
+    if (/network timeout|failed to fetch|networkerror|load failed|fetch/i.test(msg)) return "network error";
+    if (/network error/i.test(msg)) return "network error";
     return msg || "unknown error";
+  }
+
+  function isAuthError(e) {
+    const msg = String(e?.message || e || "");
+    const m = msg.match(/^HTTP\s+(\d{3})/);
+    if (!m) return false;
+    const code = Number(m[1]);
+    return code === 401 || code === 403;
+  }
+
+  function isNetworkError(e) {
+    const msg = String(e?.message || e || "");
+    if (/^HTTP\s+\d{3}\b/.test(msg)) return false;
+    return /network error|network timeout|failed to fetch|networkerror|load failed|fetch/i.test(msg);
   }
 
   function statusLine(sourceId) {
@@ -240,15 +285,20 @@
     const p = perSourceProgress[sourceId] || { fetched: 0 };
     const freshness = s.hasAny ? (s.isStale ? "stale" : "fresh") : "empty";
 
-    // Show fetch progress only while actively refreshing
-    const refreshing = refreshInFlightLocal && (s.isStale || !s.hasAny);
+    const holdMs = holdoffRemainingMs(sourceId);
+    const onHoldoff = holdMs > 0;
+
+    // Show "refreshing" whenever this tab is actively refreshing the source.
+    const refreshing = !!perSourceRefreshing[sourceId] && !onHoldoff;
     const fetchingText = refreshing ? " (refreshing…)" : "";
     const fetchPart = refreshing ? ` | fetch: ${p.fetched ?? 0}` : "";
+
+    const holdPart = onHoldoff ? ` | hold-off: ${fmtRemaining(holdMs)}` : "";
 
     const err = perSourceError[sourceId]?.message;
     const errPart = err ? ` | error: ${err}` : "";
 
-    return `${sourceId}: ${freshness}${fetchingText}${fetchPart} | contacts: ${n} | last fetch: ${fmtIso(s.lastUpdate)}${errPart}`;
+    return `${sourceId}: ${freshness}${fetchingText}${fetchPart} | contacts: ${n} | last fetch: ${fmtIso(s.lastUpdate)}${holdPart}${errPart}`;
   }
 
   function updateStatusBox() {
@@ -256,6 +306,12 @@
     const lines = Object.keys(SOURCES).map(statusLine);
     box.textContent = lines.join("\n");
   }
+
+  // Update countdown once per second
+  setInterval(() => {
+    const anyHold = Object.keys(SOURCES).some(sid => holdoffRemainingMs(sid) > 0);
+    if (anyHold) updateStatusBox();
+  }, 1000);
 
   // ---------------------------
   // Helpers
@@ -265,6 +321,47 @@
       localStorage.removeItem(OLD_CACHE_KEY);
       console.log("[Autocomplete] Old localStorage cache cleared.");
     }
+  }
+
+  function xFetchJson(url, { withCredentials = false } = {}) {
+    const req =
+      (typeof GM_xmlhttpRequest === "function" && GM_xmlhttpRequest) ||
+      (typeof GM !== "undefined" && GM?.xmlHttpRequest) ||
+      null;
+
+    if (!req) throw new Error("No userscript XHR API available");
+
+    return new Promise((resolve, reject) => {
+      req({
+        method: "GET",
+        url,
+        withCredentials,
+        headers: { "Accept": "application/json" },
+        onload: (r) => {
+          const status = r.status || 0;
+          if (status < 200 || status >= 300) {
+            const err = new Error("HTTP " + status);
+            err._gm = r;
+            return reject(err);
+          }
+          try { resolve(JSON.parse(r.responseText)); }
+          catch (e) {
+            e._gm = r;
+            reject(e);
+          }
+        },
+        onerror: (r) => {
+          const err = new Error("network error");
+          err._gm = r;
+          reject(err);
+        },
+        ontimeout: (r) => {
+          const err = new Error("network timeout");
+          err._gm = r;
+          reject(err);
+        }
+      });
+    });
   }
 
   function metaKey(sourceId, field) {
@@ -432,8 +529,9 @@
 
         state[sourceId] = { hasAny, isStale, lastUpdate };
 
-        // initialize progress tracking
         perSourceProgress[sourceId] = perSourceProgress[sourceId] || { fetched: 0 };
+        perSourceRefreshing[sourceId] = perSourceRefreshing[sourceId] || false;
+        perSourceHoldoffUntil[sourceId] = perSourceHoldoffUntil[sourceId] || 0;
       }));
 
       return { contacts: allContacts, state, counts };
@@ -444,8 +542,11 @@
       for (const sid of Object.keys(SOURCES)) state[sid] = { hasAny: false, isStale: true, lastUpdate: 0 };
       for (const sid of Object.keys(SOURCES)) counts[sid] = 0;
 
-      // initialize progress placeholders
-      Object.keys(SOURCES).forEach(sid => perSourceProgress[sid] = { fetched: 0 });
+      Object.keys(SOURCES).forEach(sid => {
+        perSourceProgress[sid] = { fetched: 0 };
+        perSourceRefreshing[sid] = false;
+        perSourceHoldoffUntil[sid] = perSourceHoldoffUntil[sid] || 0;
+      });
       return { contacts: [], state, counts };
     }
   }
@@ -456,9 +557,10 @@
     perSourceCounts = counts;
     contacts = buildEffectiveContacts(allRows);
 
-    // reset per-source progress for fresh UI state
     Object.keys(SOURCES).forEach(sid => {
       perSourceProgress[sid] = perSourceProgress[sid] || { fetched: 0 };
+      perSourceRefreshing[sid] = perSourceRefreshing[sid] || false;
+      perSourceHoldoffUntil[sid] = perSourceHoldoffUntil[sid] || 0;
     });
 
     updateStatusBox();
@@ -485,8 +587,22 @@
 
     if (st.hasAny && !st.isStale) return;
 
+    // Hold-off: do not try to refresh while on hold-off
+    if (holdoffRemainingMs(sourceId) > 0) {
+      perSourceRefreshing[sourceId] = false;
+      updateStatusBox();
+      return;
+    }
+
     const lease = await tryAcquireRefreshLease(sourceId);
-    if (!lease.ok) return; // another tab is refreshing this source
+    if (!lease.ok) {
+      perSourceRefreshing[sourceId] = false;
+      return;
+    }
+
+    perSourceRefreshing[sourceId] = true;
+    perSourceProgress[sourceId] = perSourceProgress[sourceId] || { fetched: 0 };
+    updateStatusBox();
 
     try {
       await reloadContactsFromIDB();
@@ -501,13 +617,21 @@
       await saveSourceToIndexedDB(sourceId, fresh);
       await cleanupOldRecords(sourceId, syncID);
 
-      clearSourceError(sourceId); // success clears error
+      clearSourceError(sourceId);
+      clearSourceHoldoff(sourceId);
       console.log(`[Autocomplete] ${sourceId} refreshed:`, fresh.length);
     } catch (e) {
-      // Show error in status line and keep using stale cache
       setSourceError(sourceId, classifyError(e));
-      console.error(`[Autocomplete] Error refreshing ${sourceId}:`, e);
+
+      // Log full error (and GM response details if present)
+      console.error(`[Autocomplete] Error refreshing ${sourceId} (full):`, e, e?._gm);
+
+      if (isNetworkError(e) || isAuthError(e)) {
+        setSourceHoldoff(sourceId, HOLDOFF_MS);
+      }
     } finally {
+      perSourceRefreshing[sourceId] = false;
+      updateStatusBox();
       await releaseRefreshLease(sourceId, lease.owner);
     }
   }

@@ -4,7 +4,7 @@
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
 // @downloadURL https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
-// @version     1.4.8
+// @version     1.4.9
 // @grant       GM_xmlhttpRequest
 // @grant       GM.xmlHttpRequest
 // @connect     jira.team.uni-bonn.de
@@ -43,6 +43,9 @@
   // In-memory hold-off after network/auth errors (per source, per tab)
   const perSourceHoldoffUntil = {}; // { [sourceId]: number (ts ms) }
   const HOLDOFF_MS = 60 * 1000;
+
+  // Timer to wake up exactly when hold-off ends (per source)
+  const perSourceHoldoffTimer = {}; // { [sourceId]: number }
 
   // In-memory: whether this tab is actively refreshing a given source
   const perSourceRefreshing = {}; // { [sourceId]: boolean }
@@ -227,13 +230,30 @@
   }
 
   function setSourceHoldoff(sourceId, ms = HOLDOFF_MS) {
-    perSourceHoldoffUntil[sourceId] = Date.now() + ms;
+    const until = Date.now() + ms;
+    perSourceHoldoffUntil[sourceId] = until;
+
+    // schedule exactly one wake-up when hold-off expires
+    if (perSourceHoldoffTimer[sourceId]) clearTimeout(perSourceHoldoffTimer[sourceId]);
+    perSourceHoldoffTimer[sourceId] = setTimeout(() => {
+      perSourceHoldoffUntil[sourceId] = 0;
+
+      clearSourceError(sourceId);
+
+      updateStatusBox();
+      backgroundRefreshIfNeeded();
+    }, Math.max(0, until - Date.now()) + 50);
+
     updateStatusBox();
   }
 
   function clearSourceHoldoff(sourceId) {
     if (perSourceHoldoffUntil[sourceId]) {
       perSourceHoldoffUntil[sourceId] = 0;
+      if (perSourceHoldoffTimer[sourceId]) {
+        clearTimeout(perSourceHoldoffTimer[sourceId]);
+        perSourceHoldoffTimer[sourceId] = 0;
+      }
       updateStatusBox();
     }
   }
@@ -307,10 +327,13 @@
     box.textContent = lines.join("\n");
   }
 
-  // Update countdown once per second
+  // Update countdown once per second (also do a final update when a hold-off just ended)
   setInterval(() => {
-    const anyHold = Object.keys(SOURCES).some(sid => holdoffRemainingMs(sid) > 0);
-    if (anyHold) updateStatusBox();
+    const anyHoldOrJustEnded = Object.keys(SOURCES).some(sid => {
+      const rem = holdoffRemainingMs(sid);
+      return rem > 0 || (perSourceHoldoffUntil[sid] && rem === 0);
+    });
+    if (anyHoldOrJustEnded) updateStatusBox();
   }, 1000);
 
   // ---------------------------

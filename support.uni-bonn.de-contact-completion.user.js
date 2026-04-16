@@ -4,7 +4,7 @@
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
 // @downloadURL https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
-// @version     1.5.2
+// @version     1.5.3
 // @grant       GM_xmlhttpRequest
 // @grant       GM.xmlHttpRequest
 // @connect     jira.team.uni-bonn.de
@@ -743,22 +743,17 @@
   // Autocomplete UI
   // ---------------------------
 
-  function getCurrentToken(value, cursorPos) {
-    return value.slice(0, cursorPos).split(",").pop().trim();
+  function getQueryWords(value) {
+    return String(value || "")
+      .toLowerCase()
+      .split(/\s+/)
+      .map(w => w.trim())
+      .filter(Boolean);
   }
 
-  function replaceCurrentToken(input, replacement) {
-    const pos = input.selectionStart;
-    const left = input.value.slice(0, pos);
-    const right = input.value.slice(pos);
-
-    const parts = left.split(",");
-    parts[parts.length - 1] = " " + replacement;
-
-    const newLeft = parts.join(",").replace(/^,/, "");
-    input.value = newLeft + ", " + right.replace(/^,?\s*/, "");
-
-    const newPos = newLeft.length + 2;
+  function replaceFullInput(input, replacement) {
+    input.value = replacement;
+    const newPos = replacement.length;
     input.setSelectionRange(newPos, newPos);
   }
 
@@ -821,7 +816,7 @@
         if (!m.disabled) {
           el.addEventListener("mousedown", e => {
             e.preventDefault();
-            replaceCurrentToken(input, m.text);
+            replaceFullInput(input, m.text);
             hide();
           });
         }
@@ -845,7 +840,7 @@
       if (selectedIndex >= 0) {
         const el = box.children[selectedIndex];
         if (el && el.style.cursor === "pointer") {
-          replaceCurrentToken(input, el.dataset.value || el.textContent);
+          replaceFullInput(input, el.dataset.value || el.textContent);
           hide();
         }
       }
@@ -859,9 +854,12 @@
     return { render, move, choose, hide };
   }
 
-  function queryMatches(tokenLower) {
+  function queryMatchesFromValue(inputValue) {
+    const words = getQueryWords(inputValue);
+    if (words.length === 0) return [];
+
     const matches = contacts
-      .filter(c => c.search.includes(tokenLower))
+      .filter(c => words.every(w => c.search.includes(w)))
       .slice(0, 10)
       .map(c => ({ text: c.text, source: c.source }));
 
@@ -877,8 +875,8 @@
       const input = inst.input;
       const dropdown = inst.dropdown;
       if (!input) continue;
-      const token = getCurrentToken(input.value, input.selectionStart).toLowerCase();
-      if (token.length >= 2) dropdown.render(queryMatches(token));
+      const words = getQueryWords(input.value);
+      if (words.join(" ").length >= 2) dropdown.render(queryMatchesFromValue(input.value));
     }
   }
 
@@ -888,12 +886,12 @@
     autocompleteInstances.push({ input, dropdown });
 
     input.addEventListener("input", () => {
-      const token = getCurrentToken(input.value, input.selectionStart).toLowerCase();
-      if (token.length < 2) {
+      const words = getQueryWords(input.value);
+      if (words.join(" ").length < 2) {
         dropdown.hide();
         return;
       }
-      dropdown.render(queryMatches(token));
+      dropdown.render(queryMatchesFromValue(input.value));
     });
 
     input.addEventListener("keydown", e => {

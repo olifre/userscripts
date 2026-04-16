@@ -4,7 +4,8 @@
 // @match       https://support.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de.user.js
 // @downloadURL https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de.user.js
-// @version     1.0.11
+// @icon        https://olifre.github.io/favicon.ico
+// @version     1.0.12
 // @grant       none
 // @description Allows to select a larger number of tickets to show, translate replies to English, flip submit and draft button, fix page titles.
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)

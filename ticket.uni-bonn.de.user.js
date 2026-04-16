@@ -3,7 +3,9 @@
 // @namespace   github.com/olifre/userstyles
 // @match       https://ticket.uni-bonn.de/*
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/ticket.uni-bonn.de.user.js
-// @version     1.2.0
+// @downloadURL https://raw.githubusercontent.com/olifre/userscripts/main/ticket.uni-bonn.de.user.js
+// @icon        https://olifre.github.io/favicon.ico
+// @version     1.2.1
 // @grant       none
 // @description Allows to select a larger number of tickets to show, and translate replies to English.
 // @author      Oliver Freyermuth <o.freyermuth@googlemail.com> (https://olifre.github.io/)

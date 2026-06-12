@@ -5,7 +5,7 @@
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
 // @downloadURL https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
 // @icon        https://olifre.github.io/favicon.ico
-// @version     1.6.0
+// @version     1.6.1
 // @grant       GM_xmlhttpRequest
 // @grant       GM.xmlHttpRequest
 // @connect     jira.team.uni-bonn.de
@@ -34,6 +34,7 @@
   // ---------------------------
   const LS_CUSTOMTEXT_URLS = "znuny_contact_autocomplete_customtext_urls";
   const LS_CUSTOMTEXT_UI_ENABLED = "znuny_contact_autocomplete_customtext_ui_enabled";
+  const LS_STATUSBOX_COLLAPSED = "znuny_contact_autocomplete_statusbox_collapsed";
 
   function lsGet(key, def) {
     try {
@@ -43,6 +44,7 @@
       return def;
     }
   }
+
   function lsSet(key, val) {
     try {
       localStorage.setItem(key, String(val ?? ""));
@@ -50,6 +52,7 @@
   }
 
   let customTextHasUrls = false;
+
   async function refreshCustomTextHasUrlsCache() {
     const uiVal = lsGet(LS_CUSTOMTEXT_URLS, "");
     customTextHasUrls = !!String(uiVal || "").trim();
@@ -78,15 +81,9 @@
   let perSourceCounts = {};
   let autocompleteInstances = [];
   let refreshInFlightLocal = false;
-
   let statusBox = null;
 
-  // ---------------------------
-  // Custom text parsing/fetch
-  // ---------------------------
   function parseCustomTextLines(text) {
-    // Format per line:
-    // mail@example.com Voller Name und Sonderzeichen und so
     const lines = String(text || "")
       .split(/\r?\n/)
       .map(l => l.trim())
@@ -192,7 +189,7 @@
 
     // Jira (cursor-based) data source
     jira: {
-      id: "jira", // lower than phy
+      id: "jira",
       priority: 50,
       cacheTtlMs: 24 * 60 * 60 * 1000,
       refreshLeaseTtlMs: 2 * 60 * 1000,
@@ -441,6 +438,44 @@
     const box = ensureStatusBox();
     box.innerHTML = "";
 
+    const collapsed = lsGet(LS_STATUSBOX_COLLAPSED, "0") === "1";
+
+    Object.assign(box.style, collapsed ? {
+      padding: "4px 8px",
+      minWidth: "0",
+      maxWidth: "none",
+      width: "auto",
+      borderRadius: "999px",
+      whiteSpace: "nowrap"
+    } : {
+      padding: "6px 10px",
+      minWidth: "360px",
+      maxWidth: "900px",
+      width: "auto",
+      borderRadius: "6px",
+      whiteSpace: "normal"
+    });
+
+    if (collapsed) {
+      const open = document.createElement("a");
+      open.href = "#";
+      open.textContent = "👥";
+      open.title = "Show contact autocomplete status";
+      open.style.textDecoration = "none";
+      open.style.fontWeight = "700";
+      open.style.color = "#0645ad";
+      open.style.pointerEvents = "auto";
+
+      open.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        lsSet(LS_STATUSBOX_COLLAPSED, "0");
+        updateStatusBox();
+      });
+
+      box.appendChild(open);
+      return;
+    }
+
     const enabledEntries = Object.keys(SOURCES).filter(sid => {
       if (sid === "customtext") {
         if (!customTextHasUrls) return false;
@@ -483,7 +518,6 @@
       box.appendChild(row);
     }
 
-    // Single gear
     const gearRow = document.createElement("div");
     gearRow.style.display = "flex";
     gearRow.style.gap = "8px";
@@ -494,6 +528,22 @@
     gearLabel.style.whiteSpace = "pre";
     gearLabel.style.flex = "1 1 auto";
     gearLabel.style.minWidth = "0";
+
+    const collapse = document.createElement("a");
+    collapse.href = "#";
+    collapse.textContent = "−";
+    collapse.title = "Collapse status";
+    collapse.style.flex = "0 0 auto";
+    collapse.style.textDecoration = "none";
+    collapse.style.fontWeight = "700";
+    collapse.style.color = "#666";
+    collapse.style.pointerEvents = "auto";
+
+    collapse.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      lsSet(LS_STATUSBOX_COLLAPSED, "1");
+      updateStatusBox();
+    });
 
     const gear = document.createElement("a");
     gear.href = "#";
@@ -529,6 +579,7 @@
     });
 
     gearRow.appendChild(gearLabel);
+    gearRow.appendChild(collapse);
     gearRow.appendChild(gear);
     box.appendChild(gearRow);
   }

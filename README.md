@@ -27,3 +27,4 @@ You should switch to the successor script listed below!
 
 Work in progress - in addition to the public data from "Physikalisches Institut, Universität Bonn" for autocompletion in To, Cc and Bcc fields,
 it also pulls data from the local Uni Bonn JIRA instance if logged in with an account activated for JIRA.
+In addition, custom URLs referencing txt files can be added which are then scraped and added.

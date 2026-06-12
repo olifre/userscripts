@@ -5,7 +5,7 @@
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
 // @downloadURL https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
 // @icon        https://olifre.github.io/favicon.ico
-// @version     1.5.4
+// @version     1.6.0
 // @grant       GM_xmlhttpRequest
 // @grant       GM.xmlHttpRequest
 // @connect     jira.team.uni-bonn.de
@@ -27,37 +27,137 @@
     /\bAction=AgentTicketPhoneInbound\b/.test(location.search) ||
     /\bAction=AgentTicketPhone\b/.test(location.search) ||
     /\bAction=AgentTicketForward\b/.test(location.search)
-  )) {
-    return;
+  )) return;
+
+  // ---------------------------
+  // Persisted settings via localStorage
+  // ---------------------------
+  const LS_CUSTOMTEXT_URLS = "znuny_contact_autocomplete_customtext_urls";
+  const LS_CUSTOMTEXT_UI_ENABLED = "znuny_contact_autocomplete_customtext_ui_enabled";
+
+  function lsGet(key, def) {
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? def : v;
+    } catch {
+      return def;
+    }
+  }
+  function lsSet(key, val) {
+    try {
+      localStorage.setItem(key, String(val ?? ""));
+    } catch {}
+  }
+
+  let customTextHasUrls = false;
+  async function refreshCustomTextHasUrlsCache() {
+    const uiVal = lsGet(LS_CUSTOMTEXT_URLS, "");
+    customTextHasUrls = !!String(uiVal || "").trim();
   }
 
   // ---------------------------
-  // Sources (extendable)
+  // In-memory state
   // ---------------------------
-
-  // In-memory progress tracking (per source)
-  const perSourceProgress = {}; // { [sourceId]: { fetched } }
-
-  // In-memory last error (per source)
-  const perSourceError = {}; // { [sourceId]: { message: string, ts: number } }
-
-  // In-memory hold-off after network/auth errors (per source, per tab)
-  const perSourceHoldoffUntil = {}; // { [sourceId]: number (ts ms) }
+  const perSourceProgress = {};
+  const perSourceError = {};
+  const perSourceHoldoffUntil = {};
   const HOLDOFF_MS = 60 * 1000;
+  const perSourceHoldoffTimer = {};
+  const perSourceRefreshing = {};
+  const perSourceLeaseBlockedBy = {};
 
-  // Timer to wake up exactly when hold-off ends (per source)
-  const perSourceHoldoffTimer = {}; // { [sourceId]: number }
-
-  // In-memory: whether this tab is actively refreshing a given source
-  const perSourceRefreshing = {}; // { [sourceId]: boolean }
-
-  // In-memory: another tab holds the refresh lease (per source)
-  const perSourceLeaseBlockedBy = {}; // { [sourceId]: string|null }
-
-  // Broadcast channel and helper
   const BC_NAME = "znuny_contacts_bc_v2";
   const bc = new BroadcastChannel(BC_NAME);
 
+  const OLD_CACHE_KEY = "znuny_contacts_cache_v1";
+  const DB_NAME = "ZnunyContactDB";
+  const DB_VERSION = 4;
+
+  let contacts = [];
+  let perSourceState = {};
+  let perSourceCounts = {};
+  let autocompleteInstances = [];
+  let refreshInFlightLocal = false;
+
+  let statusBox = null;
+
+  // ---------------------------
+  // Custom text parsing/fetch
+  // ---------------------------
+  function parseCustomTextLines(text) {
+    // Format per line:
+    // mail@example.com Voller Name und Sonderzeichen und so
+    const lines = String(text || "")
+      .split(/\r?\n/)
+      .map(l => l.trim())
+      .filter(Boolean);
+
+    const out = [];
+    for (const line of lines) {
+      const m = line.match(/^(\S+)\s+(.+)$/);
+      if (!m) continue;
+
+      const emailRaw = m[1];
+      const nameRaw = m[2];
+
+      const email = String(emailRaw).toLowerCase().trim();
+      if (!email) continue;
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) continue;
+
+      const display = String(nameRaw).replace(/\s+/g, " ").trim();
+      const textOut = `"${display}" <${email}>`.replace(/\s+/g, " ").trim();
+
+      out.push({
+        key: `${email}|customtext`,
+        email,
+        text: textOut,
+        search: textOut.toLowerCase(),
+        source: "customtext",
+        syncID: 0
+      });
+    }
+    return out;
+  }
+
+  async function fetchText(url) {
+    const req =
+      (typeof GM_xmlhttpRequest === "function" && GM_xmlhttpRequest) ||
+      (typeof GM !== "undefined" && GM?.xmlHttpRequest) ||
+      null;
+    if (!req) throw new Error("No userscript XHR API available");
+
+    return new Promise((resolve, reject) => {
+      req({
+        method: "GET",
+        url,
+        withCredentials: false,
+        headers: { "Accept": "text/plain, */*" },
+        onload: (r) => {
+          const status = r.status || 0;
+          if (status < 200 || status >= 300) {
+            const err = new Error("HTTP " + status);
+            err._gm = r;
+            return reject(err);
+          }
+          resolve(r.responseText || "");
+        },
+        onerror: (r) => {
+          const err = new Error("network error");
+          err._gm = r;
+          reject(err);
+        },
+        ontimeout: (r) => {
+          const err = new Error("network timeout");
+          err._gm = r;
+          reject(err);
+        }
+      });
+    });
+  }
+
+  // ---------------------------
+  // Sources
+  // ---------------------------
   const SOURCES = {
     phy: {
       id: "phy",
@@ -92,23 +192,21 @@
 
     // Jira (cursor-based) data source
     jira: {
-      id: "jira",
-      priority: 50, // lower than phy
+      id: "jira", // lower than phy
+      priority: 50,
       cacheTtlMs: 24 * 60 * 60 * 1000,
       refreshLeaseTtlMs: 2 * 60 * 1000,
       url: "https://jira.team.uni-bonn.de/rest/api/2/user/list",
       batchSize: 2000,
 
-      async fetch() {        // Start from scratch for Jira (do not persist resume cursors)
+      async fetch() {
         let cursor = 0;
-
         const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
         const results = [];
         let totalFetched = 0;
         let isDone = false;
 
-        // Make sure the UI shows "refreshing" while we are inside this loop.
         perSourceRefreshing[this.id] = true;
         updateStatusBox();
 
@@ -122,21 +220,15 @@
           const batch = Array.isArray(json.values) ? json.values : [];
           results.push(...batch);
 
-          // Update every successful batch (= every 2000, except maybe the last one)
           totalFetched += batch.length;
           perSourceProgress[this.id] = { fetched: totalFetched };
           updateStatusBox();
 
-          // Determine next cursor, but do not persist it
           const nc = json.nextCursor;
           const nextCursorNum = (typeof nc === "number") ? nc : (typeof nc === "string" ? Number(nc) : NaN);
-          if (!Number.isNaN(nextCursorNum)) {
-            cursor = nextCursorNum;
-          }
+          if (!Number.isNaN(nextCursorNum)) cursor = nextCursorNum;
 
           if (json.isLast) isDone = true;
-
-          // Sleep a bit to be gentle between requests (as requested)
           await sleep(200);
         }
 
@@ -162,31 +254,53 @@
           };
         }).filter(x => x.email);
       }
+    },
+
+    customtext: {
+      id: "customtext",
+      priority: 150,
+      cacheTtlMs: 6 * 60 * 60 * 1000,
+      refreshLeaseTtlMs: 2 * 60 * 1000,
+
+      async fetch() {
+        if (!customTextHasUrls) return { urls: [], texts: [] };
+
+        const ui = lsGet(LS_CUSTOMTEXT_URLS, "");
+        const urls = String(ui || "")
+          .split(/\r?\n/)
+          .map(s => s.trim())
+          .filter(Boolean);
+
+        if (!urls.length) return { urls: [], texts: [] };
+
+        const texts = [];
+        for (const url of urls) {
+          const t = await fetchText(url);
+          texts.push(t);
+        }
+        return { urls, texts };
+      },
+
+      transform(data, syncID) {
+        const texts = data?.texts || [];
+        if (!texts.length) return [];
+
+        const all = [];
+        for (const t of texts) all.push(...parseCustomTextLines(t));
+
+        return all.map(x => ({
+          ...x,
+          key: `${x.email}|${this.id}`,
+          source: this.id,
+          syncID
+        }));
+      }
     }
   };
 
   // ---------------------------
-  // Storage / IPC constants
-  // ---------------------------
-  const OLD_CACHE_KEY = "znuny_contacts_cache_v1";
-
-  const DB_NAME = "ZnunyContactDB";
-  const DB_VERSION = 4;
-
-  // ---------------------------
-  // In-memory state
-  // ---------------------------
-  let contacts = []; // effective list: unique by email, priority wins
-  let perSourceState = {}; // { [sourceId]: { hasAny, isStale, lastUpdate } }
-  let perSourceCounts = {}; // { [sourceId]: number of raw rows in IDB for that source }
-  let autocompleteInstances = []; // { input, dropdown }
-  let refreshInFlightLocal = false;
-
-  // ---------------------------
   // Status UI
   // ---------------------------
-  let statusBox = null;
-
   function ensureStatusBox() {
     if (statusBox) return statusBox;
 
@@ -237,13 +351,10 @@
     const until = Date.now() + ms;
     perSourceHoldoffUntil[sourceId] = until;
 
-    // schedule exactly one wake-up when hold-off expires
     if (perSourceHoldoffTimer[sourceId]) clearTimeout(perSourceHoldoffTimer[sourceId]);
     perSourceHoldoffTimer[sourceId] = setTimeout(() => {
       perSourceHoldoffUntil[sourceId] = 0;
-
       clearSourceError(sourceId);
-
       updateStatusBox();
       backgroundRefreshIfNeeded();
     }, Math.max(0, until - Date.now()) + 50);
@@ -276,14 +387,12 @@
 
   function classifyError(e) {
     const msg = String(e?.message || e || "");
-
     const m = msg.match(/^HTTP\s+(\d{3})/);
     if (m) {
       const code = Number(m[1]);
       if (code === 401 || code === 403) return "authentication required";
       return `HTTP ${code}`;
     }
-
     if (/network timeout|failed to fetch|networkerror|load failed|fetch/i.test(msg)) return "network error";
     if (/network error/i.test(msg)) return "network error";
     return msg || "unknown error";
@@ -312,7 +421,6 @@
     const holdMs = holdoffRemainingMs(sourceId);
     const onHoldoff = holdMs > 0;
 
-    // Show "refreshing" whenever this tab is actively refreshing the source.
     const refreshing = !!perSourceRefreshing[sourceId] && !onHoldoff;
     const fetchingText = refreshing ? " (refreshing…)" : "";
     const fetchPart = refreshing ? ` | fetch: ${p.fetched ?? 0}` : "";
@@ -325,26 +433,22 @@
     const blockedBy = perSourceLeaseBlockedBy[sourceId];
     const lockPart = blockedBy ? ` | locked (other tab)` : "";
 
-    return `${sourceId}: ${freshness}${fetchingText}${fetchPart} | contacts: ${n} | last fetch: ${fmtIso(s.lastUpdate)}${holdPart}${lockPart}${errPart}`;
-  }
-
-  async function forceStaleAndRefresh(sourceId) {
-    // Mark stale
-    await setMeta(metaKey(sourceId, "lastUpdate"), 0);
-
-    // Clear "blocked" states immediately
-    clearSourceHoldoff(sourceId);
-    clearSourceError(sourceId);
-
-    await reloadContactsFromIDB();
-    backgroundRefreshIfNeeded();
+    const label = (sourceId === "customtext") ? "Custom Text sources" : sourceId;
+    return `${label}: ${freshness}${fetchingText}${fetchPart} | contacts: ${n} | last fetch: ${fmtIso(s.lastUpdate)}${holdPart}${lockPart}${errPart}`;
   }
 
   function updateStatusBox() {
     const box = ensureStatusBox();
     box.innerHTML = "";
 
-    for (const sid of Object.keys(SOURCES)) {
+    const enabledEntries = Object.keys(SOURCES).filter(sid => {
+      if (sid === "customtext") {
+        if (!customTextHasUrls) return false;
+      }
+      return true;
+    });
+
+    for (const sid of enabledEntries) {
       const row = document.createElement("div");
       row.style.display = "flex";
       row.style.gap = "8px";
@@ -378,9 +482,57 @@
       row.appendChild(a);
       box.appendChild(row);
     }
+
+    // Single gear
+    const gearRow = document.createElement("div");
+    gearRow.style.display = "flex";
+    gearRow.style.gap = "8px";
+    gearRow.style.alignItems = "baseline";
+
+    const gearLabel = document.createElement("span");
+    gearLabel.textContent = "Settings";
+    gearLabel.style.whiteSpace = "pre";
+    gearLabel.style.flex = "1 1 auto";
+    gearLabel.style.minWidth = "0";
+
+    const gear = document.createElement("a");
+    gear.href = "#";
+    gear.textContent = "⚙";
+    gear.title = "Configure custom text URLs";
+    gear.style.flex = "0 0 auto";
+    gear.style.textDecoration = "none";
+    gear.style.fontWeight = "700";
+    gear.style.color = "#666";
+    gear.style.pointerEvents = "auto";
+
+    gear.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+
+      const existing = document.getElementById("znunyCustomTextUrlsConfig");
+      if (existing) {
+        lsSet(LS_CUSTOMTEXT_UI_ENABLED, "0");
+        existing.remove();
+        await refreshCustomTextHasUrlsCache();
+        updateStatusBox();
+        return;
+      }
+
+      lsSet(LS_CUSTOMTEXT_UI_ENABLED, "1");
+      ensureCustomTextUrlsConfigUI();
+
+      const uiVal = lsGet(LS_CUSTOMTEXT_URLS, "");
+      const area = document.getElementById("znunyCustomTextUrlsArea");
+      if (area) area.value = uiVal;
+
+      await refreshCustomTextHasUrlsCache();
+      updateStatusBox();
+    });
+
+    gearRow.appendChild(gearLabel);
+    gearRow.appendChild(gear);
+    box.appendChild(gearRow);
   }
 
-  // Update countdown once per second (also do a final update when a hold-off just ended)
   setInterval(() => {
     const anyHoldOrJustEnded = Object.keys(SOURCES).some(sid => {
       const rem = holdoffRemainingMs(sid);
@@ -390,7 +542,7 @@
   }, 1000);
 
   // ---------------------------
-  // Helpers
+  // XHR + Storage helpers
   // ---------------------------
   function cleanupOldCache() {
     if (localStorage.getItem(OLD_CACHE_KEY)) {
@@ -404,7 +556,6 @@
       (typeof GM_xmlhttpRequest === "function" && GM_xmlhttpRequest) ||
       (typeof GM !== "undefined" && GM?.xmlHttpRequest) ||
       null;
-
     if (!req) throw new Error("No userscript XHR API available");
 
     return new Promise((resolve, reject) => {
@@ -421,10 +572,7 @@
             return reject(err);
           }
           try { resolve(JSON.parse(r.responseText)); }
-          catch (e) {
-            e._gm = r;
-            reject(e);
-          }
+          catch (e) { e._gm = r; reject(e); }
         },
         onerror: (r) => {
           const err = new Error("network error");
@@ -441,7 +589,7 @@
   }
 
   function metaKey(sourceId, field) {
-    return `meta:source:${sourceId}:${field}`; // field: lastUpdate | lease
+    return `meta:source:${sourceId}:${field}`;
   }
 
   function openDB() {
@@ -484,7 +632,6 @@
     return new Promise((resolve) => { tx.oncomplete = () => resolve(); });
   }
 
-  // Per-source refresh lease (cross-tab lock).
   async function tryAcquireRefreshLease(sourceId) {
     const now = Date.now();
     const owner = `${now}-${Math.random().toString(16).slice(2)}`;
@@ -534,7 +681,6 @@
     data.forEach(item => contactStore.put(item));
     metaStore.put(Date.now(), metaKey(sourceId, "lastUpdate"));
 
-    // Update simple per-source count for UI (not strictly required)
     perSourceCounts[sourceId] = (perSourceCounts[sourceId] || 0) + data.length;
 
     return new Promise((resolve) => { tx.oncomplete = () => resolve(); });
@@ -558,8 +704,7 @@
   }
 
   function buildEffectiveContacts(allRows) {
-    const bestByEmail = new Map(); // email -> row
-
+    const bestByEmail = new Map();
     for (const row of allRows) {
       if (!row?.email) continue;
       const cur = bestByEmail.get(row.email);
@@ -571,7 +716,6 @@
       const pCur = SOURCES[cur.source]?.priority ?? 0;
       if (pNew > pCur) bestByEmail.set(row.email, row);
     }
-
     return [...bestByEmail.values()];
   }
 
@@ -655,18 +799,32 @@
   // ---------------------------
   function anySourceNeedsRefresh() {
     return Object.keys(SOURCES).some(sid => {
+      if (sid === "customtext" && !customTextHasUrls) return false;
       const s = perSourceState[sid];
       return !s || !s.hasAny || s.isStale;
     });
+  }
+
+  async function forceStaleAndRefresh(sourceId) {
+    if (sourceId === "customtext") {
+      await refreshCustomTextHasUrlsCache();
+      if (!customTextHasUrls) return;
+    }
+
+    await setMeta(metaKey(sourceId, "lastUpdate"), 0);
+    clearSourceHoldoff(sourceId);
+    clearSourceError(sourceId);
+    await reloadContactsFromIDB();
+    backgroundRefreshIfNeeded();
   }
 
   async function refreshSourceIfNeeded(sourceId) {
     const src = SOURCES[sourceId];
     const st = perSourceState[sourceId] || { hasAny: false, isStale: true, lastUpdate: 0 };
 
+    if (sourceId === "customtext" && !customTextHasUrls) return;
     if (st.hasAny && !st.isStale) return;
 
-    // Hold-off: do not try to refresh while on hold-off
     if (holdoffRemainingMs(sourceId) > 0) {
       perSourceRefreshing[sourceId] = false;
       updateStatusBox();
@@ -693,9 +851,10 @@
       if (st2.hasAny && !st2.isStale) return;
 
       const syncID = Date.now();
-
       const raw = await src.fetch();
       const fresh = src.transform(raw, syncID);
+
+      if (sourceId === "customtext" && !customTextHasUrls) return;
 
       await saveSourceToIndexedDB(sourceId, fresh);
       await cleanupOldRecords(sourceId, syncID);
@@ -705,8 +864,6 @@
       console.log(`[Autocomplete] ${sourceId} refreshed:`, fresh.length);
     } catch (e) {
       setSourceError(sourceId, classifyError(e));
-
-      // Log full error (and GM response details if present)
       console.error(`[Autocomplete] Error refreshing ${sourceId} (full):`, e, e?._gm);
 
       if (isNetworkError(e) || isAuthError(e)) {
@@ -743,7 +900,6 @@
   // ---------------------------
   // Autocomplete UI
   // ---------------------------
-
   function getQueryWords(value) {
     return String(value || "")
       .toLowerCase()
@@ -797,7 +953,6 @@
         main.textContent = m.text;
         main.style.flex = "1 1 auto";
         main.style.minWidth = "0";
-
         el.appendChild(main);
 
         if (m.source) {
@@ -809,6 +964,7 @@
           src.style.color = "#666";
           el.appendChild(src);
         }
+
         el.style.padding = "4px";
         el.style.cursor = m.disabled ? "default" : "pointer";
         el.style.color = m.disabled ? "#666" : "#000";
@@ -864,7 +1020,11 @@
       .slice(0, 10)
       .map(c => ({ text: c.text, source: c.source }));
 
-    const anyMissing = Object.keys(SOURCES).some(sid => !(perSourceState[sid]?.hasAny));
+    const anyMissing = Object.keys(SOURCES).some(sid => {
+      if (sid === "customtext" && !customTextHasUrls) return false;
+      return !(perSourceState[sid]?.hasAny);
+    });
+
     if (anyMissing && refreshInFlightLocal) {
       matches.unshift({ text: "Loading contacts… (cache is being filled)", disabled: true });
     }
@@ -920,7 +1080,6 @@
   function setupCrossTabListeners() {
     bc.onmessage = async (ev) => {
       if (ev?.data?.type === "cacheUpdated") {
-        // Locks might be gone, re-check.
         Object.keys(SOURCES).forEach(sid => { perSourceLeaseBlockedBy[sid] = null; });
         await reloadContactsFromIDB();
         updateAllDropdownsLoadingHint();
@@ -929,11 +1088,102 @@
     };
   }
 
+  // ---------------------------
+  // Custom text config UI (top near status box)
+  // ---------------------------
+  function ensureCustomTextUrlsConfigUI() {
+    const existing = document.getElementById("znunyCustomTextUrlsConfig");
+    if (existing) return;
+
+    const box = document.createElement("div");
+    box.id = "znunyCustomTextUrlsConfig";
+    Object.assign(box.style, {
+      position: "fixed",
+      top: "54px",
+      right: "12px",
+      zIndex: 100000,
+      background: "rgba(255,255,255,0.97)",
+      border: "1px solid #bbb",
+      borderRadius: "6px",
+      padding: "10px",
+      boxShadow: "0 4px 10px rgba(0,0,0,0.15)",
+      fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
+      fontSize: "12px",
+      color: "#111",
+      width: "420px",
+      maxWidth: "90vw"
+    });
+
+    box.innerHTML = `
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+        <div style="font-weight:700;">Custom text sources</div>
+        <button type="button" id="znunyCustomTextUrlsClose" style="cursor:pointer;">✕</button>
+      </div>
+      <div style="margin-top:6px; opacity:0.9;">
+        URLs (one URL per line), URL must return plain text.
+      </div>
+      <div style="margin-top:6px; opacity:0.9;">
+        Format of text files: <code>mail@example.com Full Name</code>
+      </div>
+      <textarea id="znunyCustomTextUrlsArea" style="width:100%; height:120px; margin-top:8px; font-family:monospace; font-size:12px;"></textarea>
+      <div style="display:flex; gap:8px; margin-top:8px;">
+        <button type="button" id="znunyCustomTextUrlsSave" style="cursor:pointer; font-weight:600;">Save</button>
+      </div>
+      <div id="znunyCustomTextUrlsHint" style="margin-top:8px; opacity:0.75;"></div>
+    `;
+
+    document.body.appendChild(box);
+
+    const hint = box.querySelector("#znunyCustomTextUrlsHint");
+
+    box.querySelector("#znunyCustomTextUrlsClose").addEventListener("click", async () => {
+      lsSet(LS_CUSTOMTEXT_UI_ENABLED, "0");
+      box.remove();
+      await refreshCustomTextHasUrlsCache();
+      updateStatusBox();
+    });
+
+    box.querySelector("#znunyCustomTextUrlsSave").addEventListener("click", async () => {
+      const area = box.querySelector("#znunyCustomTextUrlsArea");
+
+      // store trimmed non-empty lines only
+      const lines = String(area.value || "")
+        .split(/\r?\n/)
+        .map(l => l.trim())
+        .filter(Boolean);
+
+      const toStore = lines.join("\n");
+      lsSet(LS_CUSTOMTEXT_URLS, toStore);
+
+      await refreshCustomTextHasUrlsCache();
+      updateStatusBox();
+
+      const ok = !!toStore.trim();
+      hint.textContent = `Saved. URLs active: ${ok ? "yes" : "no"}.`;
+    });
+  }
+
+  // ---------------------------
+  // Init
+  // ---------------------------
   async function init() {
     cleanupOldCache();
     ensureStatusBox();
-    updateStatusBox();
     setupCrossTabListeners();
+
+    await refreshCustomTextHasUrlsCache();
+
+    const uiEnabled = lsGet(LS_CUSTOMTEXT_UI_ENABLED, "0") === "1";
+    updateStatusBox();
+
+    if (uiEnabled) {
+      ensureCustomTextUrlsConfigUI();
+      const uiVal = lsGet(LS_CUSTOMTEXT_URLS, "");
+      const area = document.getElementById("znunyCustomTextUrlsArea");
+      if (area) area.value = uiVal;
+      await refreshCustomTextHasUrlsCache();
+      updateStatusBox();
+    }
 
     await reloadContactsFromIDB();
 

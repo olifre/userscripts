@@ -25,6 +25,19 @@ You should switch to the successor script listed below!
 ## support.uni-bonn.de: Contact autocompletion
 [![Install directly](https://img.shields.io/badge/Install%20directly%20with-any%20Monkey-285959.svg)](https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js)
 
-Work in progress - in addition to the public data from "Physikalisches Institut, Universität Bonn" for autocompletion in To, Cc and Bcc fields,
+In addition to the public data from "Physikalisches Institut, Universität Bonn" for autocompletion in To, Cc and Bcc fields,
 it also pulls data from the local Uni Bonn JIRA instance if logged in with an account activated for JIRA.
 In addition, custom URLs referencing txt files can be added which are then scraped and added.
+
+Disclaimer: Partially vibe-coded.
+
+## "Phrasenschwein": Collect funny phrases or quotes on a NextCloud instance
+[![Install directly](https://img.shields.io/badge/Install%20directly%20with-any%20Monkey-285959.svg)](https://raw.githubusercontent.com/olifre/userscripts/main/phrasenschwein.user.js)
+
+Needs to be configured first, for now only tested with ViolentMonkey.
+Need to set up an upload-only public share on your NextCloud, then set share-id and password, and a keybinding (Default: Alt+Shift+P).
+Selecting text and pressing the keybinding or opening the plugin from the monkey menu will pre-fill with the currently selected text and allow uploading it.
+Files will be named by unix timestamp with a random addition plus .txt extension.
+This allows to collect funny quotes which can then be used with separate tooling as phrase of the day or similar.
+
+Disclaimer: Partially vibe-coded.

@@ -5,7 +5,7 @@
 // @icon        https://olifre.github.io/favicon.ico
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/phrasenschwein.user.js
 // @downloadURL https://raw.githubusercontent.com/olifre/userscripts/main/phrasenschwein.user.js
-// @version     1.0.0
+// @version     1.0.2
 // @match       *://*/*
 // @run-at      document-idle
 // @grant       GM_xmlhttpRequest
@@ -20,24 +20,10 @@
 (() => {
     'use strict';
 
-    /*
-     * Kritische Browserfunktionen früh sichern. Für Event-Listener wird
-     * absichtlich die normale Methode verwendet, da ein Aufruf über
-     * EventTarget.prototype in Userscript-Sandboxes Probleme machen kann.
-     */
     const NATIVE = {
         attachShadow: Element.prototype.attachShadow,
-        getSelection: window.getSelection,
         matchMedia: window.matchMedia
     };
-
-    function on(target, type, listener, options) {
-        target.addEventListener(type, listener, options);
-    }
-
-    /* =========================================================
-     * Grundeinstellungen
-     * ========================================================= */
 
     const DEFAULTS = {
         server: 'https://uni-bonn.sciebo.de',
@@ -46,53 +32,17 @@
         hotkey: 'Alt+Shift+P'
     };
 
-    const STORAGE_PREFIX = 'phrasenschwein.';
+    const PREFIX = 'phrasenschwein.';
     const HOST_ID = 'phrasenschwein-userscript';
 
-    function getConfig(key) {
-        return GM_getValue(
-            STORAGE_PREFIX + key,
-            DEFAULTS[key]
-        );
-    }
+    const getConfig = key =>
+        GM_getValue(PREFIX + key, DEFAULTS[key]);
 
-    function setConfig(key, value) {
-        GM_setValue(STORAGE_PREFIX + key, value);
-    }
+    const setConfig = (key, value) =>
+        GM_setValue(PREFIX + key, value);
 
-    /* =========================================================
-     * Konfigurationsmenü
-     * ========================================================= */
-
-    function promptConfig(key, label, { secret = false } = {}) {
-        const current = String(getConfig(key) ?? '');
-
-        const message = secret
-            ? `${label} eingeben.\n\n` +
-              'Leer lassen, um den bisherigen Wert beizubehalten.'
-            : `${label} eingeben:`;
-
-        const value = window.prompt(
-            message,
-            secret ? '' : current
-        );
-
-        if (value === null || (secret && value === '')) {
-            return;
-        }
-
-        const normalized = key === 'password'
-            ? value
-            : value.trim();
-
-        if (!normalized && key !== 'password') {
-            window.alert(`${label} darf nicht leer sein.`);
-            return;
-        }
-
-        setConfig(key, normalized);
-        window.alert(`${label} wurde gespeichert.`);
-    }
+    const on = (target, type, listener, options) =>
+        target?.addEventListener?.(type, listener, options);
 
     /* =========================================================
      * Hilfsfunktionen
@@ -112,11 +62,6 @@
         return btoa(binary);
     }
 
-    /*
-     * Erzeugt zum Beispiel:
-     *
-     * https://uni-bonn.sciebo.de/public.php/dav/files/SHAREID/DATEI.txt
-     */
     function getUploadUrl(filename) {
         const server = String(getConfig('server'))
             .trim()
@@ -133,11 +78,9 @@
     }
 
     /*
-     * Ermittelt markierten Text aus:
-     *
-     * 1. INPUT- und TEXTAREA-Elementen
-     * 2. offenen Shadow DOMs
-     * 3. normaler Textauswahl im Dokument
+     * Liest Auswahlen aus normalen Dokumenten, Eingabefeldern
+     * und offenen Shadow DOMs. Das Userscript läuft außerdem
+     * auch direkt in Frames.
      */
     function getSelectedText() {
         try {
@@ -152,7 +95,10 @@
                     next = null;
                 }
 
-                if (!next) break;
+                if (!next) {
+                    break;
+                }
+
                 element = next;
             }
 
@@ -169,54 +115,39 @@
                 );
             }
 
-            const selection =
-                typeof document.getSelection === 'function'
-                    ? document.getSelection()
-                    : typeof window.getSelection === 'function'
-                        ? window.getSelection()
-                        : null;
+            let selection = null;
 
-            return selection ? `${selection}` : '';
+            if (typeof document.getSelection === 'function') {
+                selection = document.getSelection();
+            } else if (typeof window.getSelection === 'function') {
+                selection = window.getSelection();
+            }
+
+            return selection ? String(selection) : '';
         } catch (error) {
             console.warn(
                 'Phrasenschwein: Auswahl konnte nicht gelesen werden:',
                 error
             );
+
             return '';
         }
     }
 
     function browserPrefersDarkMode() {
-        if (typeof NATIVE.matchMedia !== 'function') {
-            return false;
-        }
-
         try {
-            return Boolean(
+            return typeof NATIVE.matchMedia === 'function' &&
                 NATIVE.matchMedia.call(
                     window,
                     '(prefers-color-scheme: dark)'
-                ).matches
-            );
+                ).matches;
         } catch {
             return false;
         }
     }
 
-    /*
-     * Erkennt beispielsweise:
-     *
-     * Alt+Shift+P
-     * Ctrl+Alt+P
-     * Ctrl+Shift+F8
-     * Meta+Shift+P
-     */
     function hotkeyMatches(event, definition) {
-        if (typeof definition !== 'string') {
-            return false;
-        }
-
-        const parts = definition
+        const parts = String(definition || '')
             .toLowerCase()
             .split('+')
             .map(part => part.trim())
@@ -224,7 +155,7 @@
 
         const has = name => parts.includes(name);
 
-        const modifierNames = new Set([
+        const modifiers = new Set([
             'alt',
             'shift',
             'ctrl',
@@ -235,64 +166,53 @@
         ]);
 
         const wantedKey = parts.find(
-            part => !modifierNames.has(part)
+            part => !modifiers.has(part)
         );
 
-        if (!wantedKey) {
-            return false;
-        }
-
-        const modifiersMatch =
-            event.altKey === has('alt') &&
-            event.shiftKey === has('shift') &&
-            event.ctrlKey === (
+        if (
+            !wantedKey ||
+            event.altKey !== has('alt') ||
+            event.shiftKey !== has('shift') ||
+            event.ctrlKey !== (
                 has('ctrl') || has('control')
-            ) &&
-            event.metaKey === (
+            ) ||
+            event.metaKey !== (
                 has('meta') ||
                 has('cmd') ||
                 has('command')
-            );
-
-        if (!modifiersMatch) {
+            )
+        ) {
             return false;
         }
 
-        const eventKey = String(event.key || '').toLowerCase();
-        const eventCode = String(event.code || '').toLowerCase();
+        const key = String(event.key || '').toLowerCase();
+        const code = String(event.code || '').toLowerCase();
 
-        /*
-         * event.key berücksichtigt das Tastaturlayout.
-         * event.code erkennt zusätzlich die physische Buchstabentaste.
-         */
         return (
-            eventKey === wantedKey ||
-            eventCode === wantedKey ||
-            eventCode === `key${wantedKey}` ||
-            eventCode === `digit${wantedKey}`
+            key === wantedKey ||
+            code === wantedKey ||
+            code === `key${wantedKey}` ||
+            code === `digit${wantedKey}`
         );
     }
 
-    function appendHost(host) {
-        const target =
-            document.body ||
-            document.documentElement;
+    function appendHost(host, callback) {
+        const target = document.body || document.documentElement;
 
         if (target) {
             target.appendChild(host);
+            callback();
             return;
         }
 
-        /*
-         * Falls das Tastenkürzel extrem früh ausgelöst wird, bevor ein
-         * Dokumentelement vorhanden ist.
-         */
         on(document, 'DOMContentLoaded', () => {
             const delayedTarget =
-                document.body ||
-                document.documentElement;
+                document.body || document.documentElement;
 
-            delayedTarget?.appendChild(host);
+            if (delayedTarget && !host.isConnected) {
+                delayedTarget.appendChild(host);
+                callback();
+            }
         }, { once: true });
     }
 
@@ -333,555 +253,874 @@
         });
 
         /*
-         * Beim erneuten Öffnen wird immer wieder die Browserpräferenz
-         * verwendet. Die manuelle Umschaltung gilt nur für diese Box.
+         * Beim Öffnen wird immer die Browserpräferenz verwendet.
+         * Eine manuelle Änderung gilt nur für diese Dialoginstanz.
          */
         let darkMode = browserPrefersDarkMode();
 
-        host.setAttribute(
-            'data-theme',
-            darkMode ? 'dark' : 'light'
-        );
+        host.dataset.theme = darkMode ? 'dark' : 'light';
 
-        let root;
+        appendHost(host, initializeDialog);
 
-        try {
-            root = NATIVE.attachShadow.call(
-                host,
-                { mode: 'open' }
-            );
-        } catch (error) {
-            window.alert(
-                'Phrasenschwein konnte nicht geöffnet werden: ' +
-                (error?.message || String(error))
-            );
-            return;
-        }
+        function initializeDialog() {
+            let root;
 
-        root.innerHTML = `
-            <style>
-                :host {
-                    --bg: #ffffff;
-                    --fg: #202124;
-                    --field: #ffffff;
-                    --border: #a8adb3;
-                    --header: #f5f6f7;
-                    --primary: #0675b8;
-                    --primary-hover: #055f95;
-                    --danger: #c62828;
-                    --danger-hover: #f7dddd;
-                    --success: #087830;
-                    --focus: rgb(6 117 184 / 25%);
+            try {
+                root = NATIVE.attachShadow.call(
+                    host,
+                    { mode: 'open' }
+                );
+            } catch (error) {
+                host.remove();
 
-                    display: block;
-                    width: min(370px, calc(100vw - 40px));
-                    color-scheme: light;
-                    font: 14px system-ui, -apple-system,
-                          BlinkMacSystemFont, "Segoe UI", sans-serif;
-                }
+                window.alert(
+                    'Phrasenschwein konnte nicht geöffnet werden: ' +
+                    (error?.message || String(error))
+                );
 
-                :host([data-theme="dark"]) {
-                    --bg: #202124;
-                    --fg: #f1f3f4;
-                    --field: #292a2d;
-                    --border: #686d73;
-                    --header: #292a2d;
-                    --primary: #168dcc;
-                    --primary-hover: #35a4df;
-                    --danger: #ff7770;
-                    --danger-hover: #543438;
-                    --success: #72d993;
-                    --focus: rgb(22 141 204 / 30%);
-
-                    color-scheme: dark;
-                }
-
-                * {
-                    box-sizing: border-box;
-                }
-
-                .box {
-                    overflow: hidden;
-                    padding: 0 16px 16px;
-                    color: var(--fg);
-                    background: var(--bg);
-                    border: 1px solid var(--border);
-                    border-radius: 10px;
-                    box-shadow: 0 5px 25px rgb(0 0 0 / 45%);
-                }
-
-                .header {
-                    display: flex;
-                    align-items: center;
-                    gap: 8px;
-                    margin: 0 -16px 12px;
-                    padding: 9px 9px 8px 16px;
-                    background: var(--header);
-                    border-bottom: 1px solid var(--border);
-                    cursor: move;
-                    user-select: none;
-                    touch-action: none;
-                }
-
-                h2 {
-                    flex: 1;
-                    margin: 0;
-                    color: var(--fg);
-                    font-size: 20px;
-                    line-height: 1.3;
-                }
-
-                button {
-                    font: inherit;
-                }
-
-                .icon-button {
-                    min-width: 32px;
-                    height: 32px;
-                    padding: 0 7px;
-                    color: var(--fg);
-                    background: transparent;
-                    border: 0;
-                    border-radius: 5px;
-                    cursor: pointer;
-                }
-
-                .icon-button:hover {
-                    background: rgb(127 127 127 / 18%);
-                }
-
-                .theme {
-                    font-size: 18px;
-                    line-height: 1;
-                }
-
-                .close {
-                    color: var(--danger);
-                    font-size: 27px;
-                    line-height: 1;
-                }
-
-                .close:hover {
-                    background: var(--danger-hover);
-                }
-
-                textarea {
-                    display: block;
-                    width: 100%;
-                    height: 150px;
-                    padding: 9px;
-                    resize: vertical;
-                    color: var(--fg);
-                    background: var(--field);
-                    border: 1px solid var(--border);
-                    border-radius: 5px;
-                    outline: none;
-                    font: inherit;
-                    line-height: 1.4;
-                }
-
-                textarea:focus {
-                    border-color: var(--primary);
-                    box-shadow: 0 0 0 2px var(--focus);
-                }
-
-                .send {
-                    margin-top: 10px;
-                    padding: 8px 14px;
-                    color: #ffffff;
-                    background: var(--primary);
-                    border: 0;
-                    border-radius: 5px;
-                    font-weight: 600;
-                    cursor: pointer;
-                }
-
-                .send:hover {
-                    background: var(--primary-hover);
-                }
-
-                .send:disabled {
-                    opacity: .6;
-                    cursor: wait;
-                }
-
-                .status {
-                    min-height: 18px;
-                    margin-top: 8px;
-                    color: var(--fg);
-                    font-size: 13px;
-                    line-height: 1.35;
-                    word-break: break-word;
-                }
-
-                .status.error {
-                    color: var(--danger);
-                }
-
-                .status.success {
-                    color: var(--success);
-                }
-            </style>
-
-            <section
-                class="box"
-                role="dialog"
-                aria-modal="false"
-                aria-labelledby="phrasenschwein-title"
-            >
-                <header class="header">
-                    <h2 id="phrasenschwein-title">
-                        Phrasenschwein
-                    </h2>
-
-                    <button
-                        class="icon-button theme"
-                        type="button"
-                        aria-label="Farbschema wechseln"
-                    ></button>
-
-                    <button
-                        class="icon-button close"
-                        type="button"
-                        title="Schließen"
-                        aria-label="Schließen"
-                    >×</button>
-                </header>
-
-                <textarea
-                    aria-label="Zu übertragender Text"
-                    placeholder="Text eingeben …"
-                ></textarea>
-
-                <button class="send" type="button">
-                    Übertragen
-                </button>
-
-                <div
-                    class="status"
-                    aria-live="polite"
-                ></div>
-            </section>
-        `;
-
-        appendHost(host);
-
-        const $ = selector => root.querySelector(selector);
-
-        const header = $('.header');
-        const textarea = $('textarea');
-        const sendButton = $('.send');
-        const themeButton = $('.theme');
-        const closeButton = $('.close');
-        const status = $('.status');
-
-        textarea.value = selectedText;
-
-        /* -----------------------------------------------------
-         * Theme
-         * ----------------------------------------------------- */
-
-        function updateThemeButton() {
-            themeButton.textContent = darkMode ? '☀' : '☾';
-
-            themeButton.title = darkMode
-                ? 'Helles Farbschema verwenden'
-                : 'Dunkles Farbschema verwenden';
-
-            themeButton.setAttribute(
-                'aria-pressed',
-                String(darkMode)
-            );
-        }
-
-        updateThemeButton();
-
-        on(themeButton, 'click', () => {
-            darkMode = !darkMode;
-
-            host.setAttribute(
-                'data-theme',
-                darkMode ? 'dark' : 'light'
-            );
-
-            updateThemeButton();
-            textarea.focus();
-        });
-
-        on(closeButton, 'click', () => {
-            host.remove();
-        });
-
-        /* -----------------------------------------------------
-         * Box verschieben
-         * ----------------------------------------------------- */
-
-        let drag = null;
-
-        on(header, 'pointerdown', event => {
-            const clickedButton =
-                event.target instanceof Element &&
-                event.target.closest('button');
-
-            if (event.button !== 0 || clickedButton) {
                 return;
             }
 
-            const rect = host.getBoundingClientRect();
+            root.innerHTML = `
+                <style>
+                    :host {
+                        --bg: #fff;
+                        --fg: #202124;
+                        --field: #fff;
+                        --border: #a8adb3;
+                        --header: #f5f6f7;
+                        --primary: #0675b8;
+                        --primary-hover: #055f95;
+                        --danger: #c62828;
+                        --danger-hover: #f7dddd;
+                        --success: #087830;
+                        --focus: rgb(6 117 184 / 25%);
 
-            drag = {
-                startX: event.clientX,
-                startY: event.clientY,
-                left: rect.left,
-                top: rect.top
-            };
-
-            host.style.right = 'auto';
-            host.style.left = `${rect.left}px`;
-            host.style.top = `${rect.top}px`;
-
-            if (typeof header.setPointerCapture === 'function') {
-                header.setPointerCapture(event.pointerId);
-            }
-
-            event.preventDefault();
-        });
-
-        on(header, 'pointermove', event => {
-            if (!drag) {
-                return;
-            }
-
-            const maxLeft = Math.max(
-                0,
-                window.innerWidth - host.offsetWidth
-            );
-
-            const maxTop = Math.max(
-                0,
-                window.innerHeight - host.offsetHeight
-            );
-
-            const left = Math.max(
-                0,
-                Math.min(
-                    maxLeft,
-                    drag.left + event.clientX - drag.startX
-                )
-            );
-
-            const top = Math.max(
-                0,
-                Math.min(
-                    maxTop,
-                    drag.top + event.clientY - drag.startY
-                )
-            );
-
-            host.style.left = `${left}px`;
-            host.style.top = `${top}px`;
-        });
-
-        const stopDragging = () => {
-            drag = null;
-        };
-
-        on(header, 'pointerup', stopDragging);
-        on(header, 'pointercancel', stopDragging);
-        on(header, 'lostpointercapture', stopDragging);
-
-        /* -----------------------------------------------------
-         * Upload
-         * ----------------------------------------------------- */
-
-        on(sendButton, 'click', () => {
-            const text = textarea.value;
-
-            if (!text.trim()) {
-                status.className = 'status error';
-                status.textContent =
-                    'Bitte zuerst Text eingeben.';
-                return;
-            }
-
-            const timestamp = Math.floor(Date.now() / 1000);
-            const randomPart = Math.random()
-                .toString(36)
-                .slice(2, 7);
-
-            const filename =
-                `${timestamp}-${randomPart}.txt`;
-
-            sendButton.disabled = true;
-            status.className = 'status';
-            status.textContent = 'Wird hochgeladen …';
-
-            GM_xmlhttpRequest({
-                method: 'PUT',
-                url: getUploadUrl(filename),
-                timeout: 30000,
-
-                headers: {
-                    Authorization: `Basic ${createBasicAuth(
-                        String(getConfig('token')).trim(),
-                        String(getConfig('password'))
-                    )}`,
-                    'Content-Type':
-                        'text/plain; charset=UTF-8'
-                },
-
-                data: text,
-
-                onload(response) {
-                    sendButton.disabled = false;
-
-                    if (
-                        response.status >= 200 &&
-                        response.status < 300
-                    ) {
-                        status.className = 'status success';
-                        status.textContent =
-                            `Erfolgreich übertragen: ${filename}`;
-
-                        textarea.value = '';
-                        return;
+                        display: block;
+                        width: min(370px, calc(100vw - 40px));
+                        color-scheme: light;
+                        font: 14px system-ui, -apple-system,
+                              BlinkMacSystemFont, "Segoe UI", sans-serif;
                     }
 
-                    const detail = String(
-                        response.responseText || ''
-                    )
-                        .replace(/<[^>]+>/g, ' ')
-                        .replace(/\s+/g, ' ')
-                        .trim()
-                        .slice(0, 250);
+                    :host([data-theme="dark"]) {
+                        --bg: #202124;
+                        --fg: #f1f3f4;
+                        --field: #292a2d;
+                        --border: #686d73;
+                        --header: #292a2d;
+                        --primary: #168dcc;
+                        --primary-hover: #35a4df;
+                        --danger: #ff7770;
+                        --danger-hover: #543438;
+                        --success: #72d993;
+                        --focus: rgb(22 141 204 / 30%);
 
-                    status.className = 'status error';
-                    status.textContent =
-                        `Upload fehlgeschlagen: HTTP ` +
-                        `${response.status}` +
-                        (response.statusText
-                            ? ` ${response.statusText}`
-                            : '') +
-                        (detail ? ` – ${detail}` : '');
-                },
+                        color-scheme: dark;
+                    }
 
-                onerror() {
-                    sendButton.disabled = false;
-                    status.className = 'status error';
-                    status.textContent =
-                        'Upload fehlgeschlagen: Netzwerkfehler.';
-                },
+                    * {
+                        box-sizing: border-box;
+                    }
 
-                ontimeout() {
-                    sendButton.disabled = false;
-                    status.className = 'status error';
-                    status.textContent =
-                        'Upload fehlgeschlagen: Zeitüberschreitung.';
+                    .box {
+                        overflow: hidden;
+                        padding: 0 16px 16px;
+                        color: var(--fg);
+                        background: var(--bg);
+                        border: 1px solid var(--border);
+                        border-radius: 10px;
+                        box-shadow: 0 5px 25px rgb(0 0 0 / 45%);
+                    }
+
+                    .header {
+                        display: flex;
+                        align-items: center;
+                        gap: 5px;
+                        margin: 0 -16px 12px;
+                        padding: 9px 9px 8px 16px;
+                        background: var(--header);
+                        border-bottom: 1px solid var(--border);
+                        cursor: move;
+                        user-select: none;
+                        touch-action: none;
+                    }
+
+                    h2 {
+                        flex: 1;
+                        margin: 0;
+                        color: var(--fg);
+                        font-size: 20px;
+                        line-height: 1.3;
+                    }
+
+                    button,
+                    input {
+                        font: inherit;
+                    }
+
+                    .icon-button {
+                        min-width: 32px;
+                        height: 32px;
+                        padding: 0 6px;
+                        color: var(--fg);
+                        background: transparent;
+                        border: 0;
+                        border-radius: 5px;
+                        cursor: pointer;
+                    }
+
+                    .icon-button:hover {
+                        background: rgb(127 127 127 / 18%);
+                    }
+
+                    .settings {
+                        font-size: 18px;
+                        line-height: 1;
+                    }
+
+                    .theme {
+                        font-size: 18px;
+                        line-height: 1;
+                    }
+
+                    .close {
+                        color: var(--danger);
+                        font-size: 27px;
+                        line-height: 1;
+                    }
+
+                    .close:hover {
+                        background: var(--danger-hover);
+                    }
+
+                    .main-panel[hidden],
+                    .settings-panel[hidden] {
+                        display: none;
+                    }
+
+                    textarea {
+                        display: block;
+                        width: 100%;
+                        height: 150px;
+                        padding: 9px;
+                        resize: vertical;
+                        color: var(--fg);
+                        background: var(--field);
+                        border: 1px solid var(--border);
+                        border-radius: 5px;
+                        outline: none;
+                        font: inherit;
+                        line-height: 1.4;
+                    }
+
+                    textarea:focus,
+                    input:focus {
+                        border-color: var(--primary);
+                        box-shadow: 0 0 0 2px var(--focus);
+                    }
+
+                    .send,
+                    .save-settings,
+                    .cancel-settings {
+                        margin-top: 10px;
+                        padding: 8px 14px;
+                        border: 0;
+                        border-radius: 5px;
+                        font-weight: 600;
+                        cursor: pointer;
+                    }
+
+                    .send,
+                    .save-settings {
+                        color: #fff;
+                        background: var(--primary);
+                    }
+
+                    .send:hover,
+                    .save-settings:hover {
+                        background: var(--primary-hover);
+                    }
+
+                    .send:disabled {
+                        opacity: .6;
+                        cursor: wait;
+                    }
+
+                    .status,
+                    .settings-message {
+                        min-height: 18px;
+                        margin-top: 8px;
+                        color: var(--fg);
+                        font-size: 13px;
+                        line-height: 1.35;
+                        word-break: break-word;
+                    }
+
+                    .error {
+                        color: var(--danger);
+                    }
+
+                    .success {
+                        color: var(--success);
+                    }
+
+                    .settings-panel label {
+                        display: block;
+                        margin-bottom: 10px;
+                        color: var(--fg);
+                        font-size: 13px;
+                        font-weight: 600;
+                    }
+
+                    .settings-panel input {
+                        display: block;
+                        width: 100%;
+                        margin-top: 4px;
+                        padding: 8px 9px;
+                        color: var(--fg);
+                        background: var(--field);
+                        border: 1px solid var(--border);
+                        border-radius: 5px;
+                        outline: none;
+                    }
+
+                    .settings-actions {
+                        display: flex;
+                        gap: 8px;
+                    }
+
+                    .cancel-settings {
+                        color: var(--fg);
+                        background: rgb(127 127 127 / 20%);
+                    }
+
+                    .cancel-settings:hover {
+                        background: rgb(127 127 127 / 30%);
+                    }
+                </style>
+
+                <section
+                    class="box"
+                    role="dialog"
+                    aria-modal="false"
+                    aria-labelledby="phrasenschwein-title"
+                >
+                    <header class="header">
+                        <h2 id="phrasenschwein-title">
+                            Phrasenschwein
+                        </h2>
+
+                        <button
+                            class="icon-button settings"
+                            type="button"
+                            title="Einstellungen"
+                            aria-label="Einstellungen"
+                        >⚙</button>
+
+                        <button
+                            class="icon-button theme"
+                            type="button"
+                            aria-label="Farbschema wechseln"
+                        ></button>
+
+                        <button
+                            class="icon-button close"
+                            type="button"
+                            title="Schließen"
+                            aria-label="Schließen"
+                        >×</button>
+                    </header>
+
+                    <div class="main-panel">
+                        <textarea
+                            aria-label="Zu übertragender Text"
+                            placeholder="Text eingeben …"
+                        ></textarea>
+
+                        <button class="send" type="button">
+                            Übertragen
+                        </button>
+
+                        <div
+                            class="status"
+                            aria-live="polite"
+                        ></div>
+                    </div>
+
+                    <div class="settings-panel" hidden>
+                        <label>
+                            Serveradresse
+                            <input
+                                class="config-server"
+                                type="url"
+                                placeholder="https://uni-bonn.sciebo.de"
+                            >
+                        </label>
+
+                        <label>
+                            Share-ID
+                            <input
+                                class="config-token"
+                                type="text"
+                                autocomplete="off"
+                                spellcheck="false"
+                            >
+                        </label>
+
+                        <label>
+                            Passwort
+                            <input
+                                class="config-password"
+                                type="password"
+                                autocomplete="off"
+                            >
+                        </label>
+
+                        <label>
+                            Tastenkombination
+                            <input
+                                class="config-hotkey"
+                                type="text"
+                                autocomplete="off"
+                                spellcheck="false"
+                                placeholder="Alt+Shift+P"
+                            >
+                        </label>
+
+                        <div class="settings-actions">
+                            <button
+                                class="save-settings"
+                                type="button"
+                            >
+                                Speichern
+                            </button>
+
+                            <button
+                                class="cancel-settings"
+                                type="button"
+                            >
+                                Abbrechen
+                            </button>
+                        </div>
+
+                        <div
+                            class="settings-message"
+                            aria-live="polite"
+                        ></div>
+                    </div>
+                </section>
+            `;
+
+            const $ = selector => root.querySelector(selector);
+
+            const header = $('.header');
+            const textarea = $('textarea');
+            const sendButton = $('.send');
+            const status = $('.status');
+            const themeButton = $('.theme');
+            const closeButton = $('.close');
+
+            /*
+             * Neue Elemente für die eingebetteten Einstellungen.
+             */
+            const mainPanel = $('.main-panel');
+            const settingsPanel = $('.settings-panel');
+            const settingsButton = $('.settings');
+            const serverInput = $('.config-server');
+            const tokenInput = $('.config-token');
+            const passwordInput = $('.config-password');
+            const hotkeyInput = $('.config-hotkey');
+            const saveSettingsButton = $('.save-settings');
+            const cancelSettingsButton = $('.cancel-settings');
+            const settingsMessage = $('.settings-message');
+
+            textarea.value = selectedText;
+
+            /* =================================================
+             * Theme
+             * ================================================= */
+
+            function updateThemeButton() {
+                themeButton.textContent = darkMode ? '☀' : '☾';
+
+                themeButton.title = darkMode
+                    ? 'Helles Farbschema verwenden'
+                    : 'Dunkles Farbschema verwenden';
+
+                themeButton.setAttribute(
+                    'aria-pressed',
+                    String(darkMode)
+                );
+            }
+
+            updateThemeButton();
+
+            on(themeButton, 'click', event => {
+                event.stopPropagation();
+
+                darkMode = !darkMode;
+                host.dataset.theme =
+                    darkMode ? 'dark' : 'light';
+
+                updateThemeButton();
+                textarea.focus();
+            });
+
+            /* =================================================
+             * Einstellungen im Dialog
+             * ================================================= */
+
+            function openSettings() {
+                serverInput.value = String(
+                    getConfig('server') ?? ''
+                );
+
+                tokenInput.value = String(
+                    getConfig('token') ?? ''
+                );
+
+                passwordInput.value = String(
+                    getConfig('password') ?? ''
+                );
+
+                hotkeyInput.value = String(
+                    getConfig('hotkey') ?? DEFAULTS.hotkey
+                );
+
+                settingsMessage.className =
+                    'settings-message';
+
+                settingsMessage.textContent = '';
+                mainPanel.hidden = true;
+                settingsPanel.hidden = false;
+                serverInput.focus();
+            }
+
+            function closeSettings() {
+                settingsPanel.hidden = true;
+                mainPanel.hidden = false;
+                textarea.focus();
+            }
+
+            on(settingsButton, 'click', event => {
+                event.stopPropagation();
+
+                if (settingsPanel.hidden) {
+                    openSettings();
+                } else {
+                    closeSettings();
                 }
             });
-        });
 
-        /*
-         * Strg/Cmd + Enter überträgt den Inhalt.
-         */
-        on(textarea, 'keydown', event => {
-            if (
-                event.key === 'Enter' &&
-                (event.ctrlKey || event.metaKey)
-            ) {
-                event.preventDefault();
-                sendButton.click();
+            on(cancelSettingsButton, 'click', closeSettings);
+
+            on(saveSettingsButton, 'click', () => {
+                const server = serverInput.value
+                    .trim()
+                    .replace(/\/+$/, '');
+
+                const token = tokenInput.value.trim();
+                const password = passwordInput.value;
+                const hotkey = hotkeyInput.value.trim();
+
+                if (!server || !token || !hotkey) {
+                    settingsMessage.className =
+                        'settings-message error';
+
+                    settingsMessage.textContent =
+                        'Serveradresse, Share-ID und ' +
+                        'Tastenkombination sind erforderlich.';
+
+                    return;
+                }
+
+                try {
+                    const parsed = new URL(server);
+
+                    if (
+                        parsed.protocol !== 'https:' &&
+                        parsed.protocol !== 'http:'
+                    ) {
+                        throw new Error('Ungültiges Protokoll');
+                    }
+                } catch {
+                    settingsMessage.className =
+                        'settings-message error';
+
+                    settingsMessage.textContent =
+                        'Bitte eine gültige Serveradresse eingeben.';
+
+                    return;
+                }
+
+                setConfig('server', server);
+                setConfig('token', token);
+                setConfig('password', password);
+                setConfig('hotkey', hotkey);
+
+                settingsMessage.className =
+                    'settings-message success';
+
+                settingsMessage.textContent =
+                    'Einstellungen gespeichert.';
+
+                window.setTimeout(closeSettings, 400);
+            });
+
+            for (const input of [
+                serverInput,
+                tokenInput,
+                passwordInput,
+                hotkeyInput
+            ]) {
+                on(input, 'keydown', event => {
+                    if (event.key === 'Enter') {
+                        event.preventDefault();
+                        saveSettingsButton.click();
+                    }
+                });
             }
-        });
 
-        /*
-         * Escape schließt den Dialog.
-         */
-        on(root, 'keydown', event => {
-            if (event.key === 'Escape') {
+            /* =================================================
+             * Schließen
+             * ================================================= */
+
+            on(closeButton, 'click', () => {
                 host.remove();
-            }
-        });
+            });
 
-        /*
-         * focus() erst nach dem Einfügen in das Dokument ausführen.
-         */
-        window.requestAnimationFrame(() => {
-            textarea.focus();
-        });
+            /* =================================================
+             * Box verschieben
+             * ================================================= */
+
+            let drag = null;
+
+            on(header, 'pointerdown', event => {
+                let clickedButton = false;
+
+                try {
+                    clickedButton = Boolean(
+                        event.target?.closest?.('button')
+                    );
+                } catch {
+                    clickedButton = false;
+                }
+
+                if (event.button !== 0 || clickedButton) {
+                    return;
+                }
+
+                const rect = host.getBoundingClientRect();
+
+                drag = {
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    left: rect.left,
+                    top: rect.top
+                };
+
+                host.style.right = 'auto';
+                host.style.left = `${rect.left}px`;
+                host.style.top = `${rect.top}px`;
+
+                try {
+                    header.setPointerCapture?.(event.pointerId);
+                } catch {
+                    // Pointer Capture ist optional.
+                }
+
+                event.preventDefault();
+            });
+
+            on(header, 'pointermove', event => {
+                if (!drag) {
+                    return;
+                }
+
+                const maxLeft = Math.max(
+                    0,
+                    window.innerWidth - host.offsetWidth
+                );
+
+                const maxTop = Math.max(
+                    0,
+                    window.innerHeight - host.offsetHeight
+                );
+
+                const left = Math.max(
+                    0,
+                    Math.min(
+                        maxLeft,
+                        drag.left +
+                        event.clientX -
+                        drag.startX
+                    )
+                );
+
+                const top = Math.max(
+                    0,
+                    Math.min(
+                        maxTop,
+                        drag.top +
+                        event.clientY -
+                        drag.startY
+                    )
+                );
+
+                host.style.left = `${left}px`;
+                host.style.top = `${top}px`;
+            });
+
+            const stopDragging = () => {
+                drag = null;
+            };
+
+            on(header, 'pointerup', stopDragging);
+            on(header, 'pointercancel', stopDragging);
+            on(header, 'lostpointercapture', stopDragging);
+
+            /* =================================================
+             * Upload
+             * ================================================= */
+
+            on(sendButton, 'click', () => {
+                const text = textarea.value;
+
+                if (!text.trim()) {
+                    status.className = 'status error';
+                    status.textContent =
+                        'Bitte zuerst Text eingeben.';
+                    return;
+                }
+
+                const timestamp = Math.floor(Date.now() / 1000);
+                const randomPart = Math.random()
+                    .toString(36)
+                    .slice(2, 7);
+
+                const filename =
+                    `${timestamp}-${randomPart}.txt`;
+
+                sendButton.disabled = true;
+                status.className = 'status';
+                status.textContent = 'Wird hochgeladen …';
+
+                let authorization;
+
+                try {
+                    authorization = createBasicAuth(
+                        String(getConfig('token')).trim(),
+                        String(getConfig('password'))
+                    );
+                } catch (error) {
+                    sendButton.disabled = false;
+                    status.className = 'status error';
+                    status.textContent =
+                        'Zugangsdaten konnten nicht verarbeitet ' +
+                        'werden: ' +
+                        (error?.message || String(error));
+
+                    return;
+                }
+
+                GM_xmlhttpRequest({
+                    method: 'PUT',
+                    url: getUploadUrl(filename),
+                    timeout: 30000,
+
+                    headers: {
+                        Authorization: `Basic ${authorization}`,
+                        'Content-Type':
+                            'text/plain; charset=UTF-8'
+                    },
+
+                    data: text,
+
+                    onload(response) {
+                        sendButton.disabled = false;
+
+                        if (
+                            response.status >= 200 &&
+                            response.status < 300
+                        ) {
+                            status.className =
+                                'status success';
+
+                            status.textContent =
+                                `Erfolgreich übertragen: ${filename}`;
+
+                            textarea.value = '';
+                            return;
+                        }
+
+                        const detail = String(
+                            response.responseText || ''
+                        )
+                            .replace(/<[^>]+>/g, ' ')
+                            .replace(/\s+/g, ' ')
+                            .trim()
+                            .slice(0, 250);
+
+                        status.className = 'status error';
+                        status.textContent =
+                            `Upload fehlgeschlagen: HTTP ` +
+                            `${response.status}` +
+                            (response.statusText
+                                ? ` ${response.statusText}`
+                                : '') +
+                            (detail ? ` – ${detail}` : '');
+                    },
+
+                    onerror() {
+                        sendButton.disabled = false;
+                        status.className = 'status error';
+                        status.textContent =
+                            'Upload fehlgeschlagen: Netzwerkfehler.';
+                    },
+
+                    ontimeout() {
+                        sendButton.disabled = false;
+                        status.className = 'status error';
+                        status.textContent =
+                            'Upload fehlgeschlagen: ' +
+                            'Zeitüberschreitung.';
+                    }
+                });
+            });
+
+            /*
+             * Strg/Cmd + Enter überträgt den Text.
+             */
+            on(textarea, 'keydown', event => {
+                if (
+                    event.key === 'Enter' &&
+                    (event.ctrlKey || event.metaKey)
+                ) {
+                    event.preventDefault();
+                    sendButton.click();
+                }
+            });
+
+            /*
+             * Escape schließt zuerst die Einstellungen,
+             * ansonsten den vollständigen Dialog.
+             */
+            on(root, 'keydown', event => {
+                if (event.key !== 'Escape') {
+                    return;
+                }
+
+                if (!settingsPanel.hidden) {
+                    closeSettings();
+                } else {
+                    host.remove();
+                }
+            });
+
+            window.setTimeout(() => {
+                textarea.focus();
+            }, 0);
+        }
     }
 
     /* =========================================================
-     * Userscript-Menü
+     * Vorhandenes Userscript-Menü
      * ========================================================= */
 
-    GM_registerMenuCommand(
-        '🐷 Phrasenschwein öffnen',
-        openPhrasenschwein
-    );
+    function promptConfig(key, label, secret = false) {
+        const current = String(getConfig(key) ?? '');
 
-    GM_registerMenuCommand(
-        '⚙ Serveradresse einstellen',
-        () => {
-            promptConfig(
+        const value = window.prompt(
+            secret
+                ? `${label} eingeben.\n\n` +
+                  'Leer lassen, um den bisherigen Wert beizubehalten.'
+                : `${label} eingeben:`,
+            secret ? '' : current
+        );
+
+        if (
+            value === null ||
+            (secret && value === '')
+        ) {
+            return;
+        }
+
+        const normalized = key === 'password'
+            ? value
+            : value.trim();
+
+        if (!normalized && key !== 'password') {
+            window.alert(`${label} darf nicht leer sein.`);
+            return;
+        }
+
+        setConfig(key, normalized);
+        window.alert(`${label} wurde gespeichert.`);
+    }
+
+    /*
+     * Menübefehle nur einmal im Hauptdokument registrieren.
+     * Das eigentliche Script läuft trotzdem auch in Frames.
+     */
+    if (window.top === window) {
+        GM_registerMenuCommand(
+            '🐷 Phrasenschwein öffnen',
+            openPhrasenschwein
+        );
+
+        GM_registerMenuCommand(
+            '⚙ Serveradresse einstellen',
+            () => promptConfig(
                 'server',
                 'Serveradresse ohne WebDAV-Pfad'
-            );
-        }
-    );
+            )
+        );
 
-    GM_registerMenuCommand(
-        '⚙ Share-ID einstellen',
-        () => {
-            promptConfig(
+        GM_registerMenuCommand(
+            '⚙ Share-ID einstellen',
+            () => promptConfig(
                 'token',
                 'Share-ID beziehungsweise Share-Token'
-            );
-        }
-    );
+            )
+        );
 
-    GM_registerMenuCommand(
-        '⚙ Passwort einstellen',
-        () => {
-            promptConfig(
+        GM_registerMenuCommand(
+            '⚙ Passwort einstellen',
+            () => promptConfig(
                 'password',
                 'Passwort',
-                { secret: true }
-            );
-        }
-    );
+                true
+            )
+        );
 
-    GM_registerMenuCommand(
-        '⌨ Tastenkombination einstellen',
-        () => {
-            promptConfig(
+        GM_registerMenuCommand(
+            '⌨ Tastenkombination einstellen',
+            () => promptConfig(
                 'hotkey',
-                'Tastenkombination, z. B. ' +
-                'Alt+Shift+P oder Ctrl+Alt+P'
-            );
-        }
-    );
+                'Tastenkombination, z. B. Alt+Shift+P'
+            )
+        );
 
-    GM_registerMenuCommand(
-        '↺ Einstellungen zurücksetzen',
-        () => {
-            const confirmed = window.confirm(
-                'Alle Phrasenschwein-Einstellungen zurücksetzen?'
-            );
+        GM_registerMenuCommand(
+            '↺ Einstellungen zurücksetzen',
+            () => {
+                if (!window.confirm(
+                    'Alle Phrasenschwein-Einstellungen zurücksetzen?'
+                )) {
+                    return;
+                }
 
-            if (!confirmed) {
-                return;
+                for (const [key, value] of Object.entries(DEFAULTS)) {
+                    setConfig(key, value);
+                }
+
+                window.alert(
+                    'Die Einstellungen wurden zurückgesetzt.'
+                );
             }
-
-            for (const [key, value] of Object.entries(DEFAULTS)) {
-                setConfig(key, value);
-            }
-
-            window.alert(
-                'Die Einstellungen wurden zurückgesetzt.'
-            );
-        }
-    );
+        );
+    }
 
     /* =========================================================
      * Globale Tastenkombination
@@ -901,7 +1140,6 @@
 
         event.preventDefault();
         event.stopImmediatePropagation();
-
         openPhrasenschwein();
     }, { capture: true });
 })();

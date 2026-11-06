@@ -128,7 +128,11 @@
         method: "GET",
         url,
         withCredentials: false,
-        headers: { "Accept": "text/plain, */*" },
+        headers: {
+          "Accept": "text/plain, */*",
+          "Cache-Control": "no-cache, no-store, max-age=0",
+          "Pragma": "no-cache"
+        },
         onload: (r) => {
           const status = r.status || 0;
           if (status < 200 || status >= 300) {

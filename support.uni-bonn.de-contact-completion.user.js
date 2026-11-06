@@ -5,7 +5,7 @@
 // @updateURL   https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
 // @downloadURL https://raw.githubusercontent.com/olifre/userscripts/main/support.uni-bonn.de-contact-completion.user.js
 // @icon        https://olifre.github.io/favicon.ico
-// @version     1.6.1
+// @version     1.6.2
 // @grant       GM_xmlhttpRequest
 // @grant       GM.xmlHttpRequest
 // @connect     jira.team.uni-bonn.de
